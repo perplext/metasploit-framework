@@ -1,4 +1,3 @@
-#!/usr/bin/env ruby
 # -*- coding: binary -*-
 
 require 'socket'
@@ -13,6 +12,8 @@ require 'rex/post/meterpreter/object_aliases'
 require 'rex/post/meterpreter/packet'
 require 'rex/post/meterpreter/packet_parser'
 require 'rex/post/meterpreter/packet_dispatcher'
+require 'rex/post/meterpreter/pivot'
+require 'rex/post/meterpreter/pivot_container'
 
 module Rex
 module Post
@@ -34,443 +35,480 @@ end
 ###
 class Client
 
-	include Rex::Post::Meterpreter::PacketDispatcher
-	include Rex::Post::Meterpreter::ChannelContainer
+  include Rex::Post::Meterpreter::PacketDispatcher
+  include Rex::Post::Meterpreter::ChannelContainer
+  include Rex::Post::Meterpreter::PivotContainer
 
-	#
-	# Extension name to class hash.
-	#
-	@@ext_hash = {}
+  #
+  # Extension name to class hash.
+  #
+  @@ext_hash = {}
 
-	#
-	# Cached SSL certificate (required to scale)
-	#
-	@@ssl_ctx = nil
+  #
+  # Cached auto-generated SSL certificate
+  #
+  @@ssl_cached_cert = nil
 
-	#
-	# Mutex to synchronize class-wide operations
-	#
-	@@ssl_mutex = ::Mutex.new
+  #
+  # Mutex to synchronize class-wide operations
+  #
+  @@ssl_mutex = ::Mutex.new
 
-	#
-	# Lookup the error that occurred
-	#
-	def self.lookup_error(code)
-		code
-	end
+  #
+  # Lookup the error that occurred
+  #
+  def self.lookup_error(code)
+    code
+  end
 
-	#
-	# Checks the extension hash to see if a class has already been associated
-	# with the supplied extension name.
-	#
-	def self.check_ext_hash(name)
-		@@ext_hash[name]
-	end
+  #
+  # Checks the extension hash to see if a class has already been associated
+  # with the supplied extension name.
+  #
+  def self.check_ext_hash(name)
+    @@ext_hash[name]
+  end
 
-	#
-	# Stores the name to class association for the supplied extension name.
-	#
-	def self.set_ext_hash(name, klass)
-		@@ext_hash[name] = klass
-	end
+  #
+  # Stores the name to class association for the supplied extension name.
+  #
+  def self.set_ext_hash(name, klass)
+    @@ext_hash[name] = klass
+  end
 
-	#
-	# Initializes the client context with the supplied socket through
-	# which communication with the server will be performed.
-	#
-	def initialize(sock,opts={})
-		init_meterpreter(sock, opts)
-	end
+  #
+  # Initializes the client context with the supplied socket through
+  # which communication with the server will be performed.
+  #
+  def initialize(sock, opts={})
+    init_meterpreter(sock, opts)
+  end
 
-	#
-	# Cleans up the meterpreter instance, terminating the dispatcher thread.
-	#
-	def cleanup_meterpreter
-		ext.aliases.each_value do | extension |
-			extension.cleanup if extension.respond_to?( 'cleanup' )
-		end
-		dispatcher_thread.kill if dispatcher_thread
-		core.shutdown rescue nil
-		shutdown_passive_dispatcher
-	end
+  #
+  # Cleans up the meterpreter instance, terminating the dispatcher thread.
+  #
+  def cleanup_meterpreter
+    if self.pivot_session
+      self.pivot_session.remove_pivot_session(self.session_guid)
+    end
 
-	#
-	# Initializes the meterpreter client instance
-	#
-	def init_meterpreter(sock,opts={})
-		self.sock         = sock
-		self.parser       = PacketParser.new
-		self.ext          = ObjectAliases.new
-		self.ext_aliases  = ObjectAliases.new
-		self.alive        = true
-		self.target_id    = opts[:target_id]
-		self.capabilities = opts[:capabilities] || {}
-		self.commands     = []
+    self.pivot_sessions.keys.each do |k|
+      pivot = self.pivot_sessions[k]
+      pivot.pivoted_session.kill('Pivot closed')
+      pivot.pivoted_session.shutdown_passive_dispatcher
+    end
 
+    unless self.skip_cleanup
+      ext.aliases.each_value do | extension |
+        extension.cleanup if extension.respond_to?( 'cleanup' )
+      end
+    end
 
-		self.conn_id      = opts[:conn_id]
-		self.url          = opts[:url]
-		self.ssl          = opts[:ssl]
-		self.expiration   = opts[:expiration]
-		self.comm_timeout = opts[:comm_timeout]
-		self.passive_dispatcher = opts[:passive_dispatcher]
+    dispatcher_thread.kill if dispatcher_thread
 
-		self.response_timeout = opts[:timeout] || self.class.default_timeout
-		self.send_keepalives  = true
-		# self.encode_unicode   = opts.has_key?(:encode_unicode) ? opts[:encode_unicode] : true
-		self.encode_unicode = false
+    unless self.skip_cleanup
+      core.shutdown rescue nil
+    end
 
-		if opts[:passive_dispatcher]
-			initialize_passive_dispatcher
+    shutdown_passive_dispatcher
+  end
 
-			register_extension_alias('core', ClientCore.new(self))
+  #
+  # Initializes the meterpreter client instance
+  #
+  def init_meterpreter(sock,opts={})
+    self.sock         = sock
+    self.parser       = PacketParser.new
+    self.ext          = ObjectAliases.new
+    self.ext_aliases  = ObjectAliases.new
+    self.alive        = true
+    self.target_id    = opts[:target_id]
+    self.capabilities = opts[:capabilities] || {}
+    self.commands     = []
+    self.last_checkin = Time.now
 
-			initialize_inbound_handlers
-			initialize_channels
+    self.conn_id      = opts[:conn_id]
+    self.url          = opts[:url]
+    self.ssl          = opts[:ssl]
 
-			# Register the channel inbound packet handler
-			register_inbound_handler(Rex::Post::Meterpreter::Channel)
-		else
-			# Switch the socket to SSL mode and receive the hello if needed
-			if capabilities[:ssl] and not opts[:skip_ssl]
-				swap_sock_plain_to_ssl()
-			end
+    self.pivot_session = opts[:pivot_session]
+    if self.pivot_session
+      self.expiration   = self.pivot_session.expiration
+      self.comm_timeout = self.pivot_session.comm_timeout
+      self.retry_total  = self.pivot_session.retry_total
+      self.retry_wait   = self.pivot_session.retry_wait
+    else
+      self.expiration   = opts[:expiration]
+      self.comm_timeout = opts[:comm_timeout]
+      self.retry_total  = opts[:retry_total]
+      self.retry_wait   = opts[:retry_wait]
+      self.passive_dispatcher = opts[:passive_dispatcher]
+    end
 
-			register_extension_alias('core', ClientCore.new(self))
+    self.response_timeout = opts[:timeout] || self.class.default_timeout
+    self.send_keepalives  = true
 
-			initialize_inbound_handlers
-			initialize_channels
+    # TODO: Clarify why we don't allow unicode to be set in initial options
+    # self.encode_unicode   = opts.has_key?(:encode_unicode) ? opts[:encode_unicode] : true
+    self.encode_unicode = false
 
-			# Register the channel inbound packet handler
-			register_inbound_handler(Rex::Post::Meterpreter::Channel)
+    self.aes_key      = nil
+    self.session_guid = opts[:session_guid] || "\x00" * 16
 
-			monitor_socket
-		end
-	end
+    # The SSL certificate is being passed down as a file path
+    if opts[:ssl_cert]
+      if ! ::File.exist? opts[:ssl_cert]
+        elog("SSL certificate at #{opts[:ssl_cert]} does not exist and will be ignored")
+      else
+        # Load the certificate the same way that SslTcpServer does it
+        self.ssl_cert = ::File.read(opts[:ssl_cert])
+      end
+    end
 
-	def swap_sock_plain_to_ssl
-		# Create a new SSL session on the existing socket
-		ctx = generate_ssl_context()
-		ssl = OpenSSL::SSL::SSLSocket.new(sock, ctx)
+    # Protocol specific dispatch mixins go here, this may be neader with explicit Client classes
+    opts[:dispatch_ext].each {|dx| self.extend(dx)} if opts[:dispatch_ext]
+    initialize_passive_dispatcher if opts[:passive_dispatcher]
 
-		# Use non-blocking OpenSSL operations on Windows
-		if not ( ssl.respond_to?(:accept_nonblock) and Rex::Compat.is_windows )
-			ssl.accept
-		else
-			begin
-				ssl.accept_nonblock
+    register_extension_alias('core', ClientCore.new(self))
 
-			# Ruby 1.8.7 and 1.9.0/1.9.1 uses a standard Errno
-			rescue ::Errno::EAGAIN, ::Errno::EWOULDBLOCK
-					IO::select(nil, nil, nil, 0.10)
-					retry
+    initialize_inbound_handlers
+    initialize_channels
+    initialize_pivots
 
-			# Ruby 1.9.2+ uses IO::WaitReadable/IO::WaitWritable
-			rescue ::Exception => e
-				if ::IO.const_defined?('WaitReadable') and e.kind_of?(::IO::WaitReadable)
-					IO::select( [ ssl ], nil, nil, 0.10 )
-					retry
-				end
+    # Register the channel and pivot inbound packet handlers
+    register_inbound_handler(Rex::Post::Meterpreter::Channel)
+    register_inbound_handler(Rex::Post::Meterpreter::Pivot)
 
-				if ::IO.const_defined?('WaitWritable') and e.kind_of?(::IO::WaitWritable)
-					IO::select( nil, [ ssl ], nil, 0.10 )
-					retry
-				end
+    monitor_socket 
+  end
 
-				raise e
-			end
-		end
+  def swap_sock_plain_to_ssl
+    # Create a new SSL session on the existing socket
+    ctx = generate_ssl_context()
+    ssl = OpenSSL::SSL::SSLSocket.new(sock, ctx)
 
-		self.sock.extend(Rex::Socket::SslTcp)
-		self.sock.sslsock = ssl
-		self.sock.sslctx  = ctx
+    # Use non-blocking OpenSSL operations on Windows
+    if !( ssl.respond_to?(:accept_nonblock) and Rex::Compat.is_windows )
+      ssl.accept
+    else
+      begin
+        ssl.accept_nonblock
 
-		tag = self.sock.get_once(-1, 30)
-		if(not tag or tag !~ /^GET \//)
-			raise RuntimeError, "Could not read the HTTP hello token"
-		end
-	end
+      # Ruby 1.8.7 and 1.9.0/1.9.1 uses a standard Errno
+      rescue ::Errno::EAGAIN, ::Errno::EWOULDBLOCK
+          IO::select(nil, nil, nil, 0.10)
+          retry
 
-	def swap_sock_ssl_to_plain
-		# Remove references to the SSLSocket and Context
-		self.sock.sslsock.close
-		self.sock.sslsock = nil
-		self.sock.sslctx  = nil
-		self.sock = self.sock.fd
-		self.sock.extend(::Rex::Socket::Tcp)
-	end
+      # Ruby 1.9.2+ uses IO::WaitReadable/IO::WaitWritable
+      rescue ::Exception => e
+        if ::IO.const_defined?('WaitReadable') and e.kind_of?(::IO::WaitReadable)
+          IO::select( [ ssl ], nil, nil, 0.10 )
+          retry
+        end
 
-	def generate_ssl_context
-		@@ssl_mutex.synchronize do
-		if not @@ssl_ctx
+        if ::IO.const_defined?('WaitWritable') and e.kind_of?(::IO::WaitWritable)
+          IO::select( nil, [ ssl ], nil, 0.10 )
+          retry
+        end
 
-		wlog("Generating SSL certificate for Meterpreter sessions")
+        raise e
+      end
+    end
 
-		key  = OpenSSL::PKey::RSA.new(1024){ }
-		cert = OpenSSL::X509::Certificate.new
-		cert.version = 2
-		cert.serial  = rand(0xFFFFFFFF)
+    self.sock.extend(Rex::Socket::SslTcp)
+    self.sock.sslsock = ssl
+    self.sock.sslctx  = ctx
+    self.sock.sslhash = Rex::Text.sha1_raw(ctx.cert.to_der)
 
-		subject = OpenSSL::X509::Name.new([
-				["C","US"],
-				['ST', Rex::Text.rand_state()],
-				["L", Rex::Text.rand_text_alpha(rand(20) + 10)],
-				["O", Rex::Text.rand_text_alpha(rand(20) + 10)],
-				["CN", self.sock.getsockname[1] || Rex::Text.rand_hostname],
-			])
-		issuer = OpenSSL::X509::Name.new([
-				["C","US"],
-				['ST', Rex::Text.rand_state()],
-				["L", Rex::Text.rand_text_alpha(rand(20) + 10)],
-				["O", Rex::Text.rand_text_alpha(rand(20) + 10)],
-				["CN", Rex::Text.rand_text_alpha(rand(20) + 10)],
-			])
+    tag = self.sock.get_once(-1, 30)
+    if(not tag or tag !~ /^GET \//)
+      raise RuntimeError, "Could not read the HTTP hello token"
+    end
+  end
 
-		cert.subject = subject
-		cert.issuer = issuer
-		cert.not_before = Time.now - (3600 * 365) + rand(3600 * 14)
-		cert.not_after = Time.now + (3600 * 365) + rand(3600 * 14)
-		cert.public_key = key.public_key
-		ef = OpenSSL::X509::ExtensionFactory.new(nil,cert)
-		cert.extensions = [
-			ef.create_extension("basicConstraints","CA:FALSE"),
-			ef.create_extension("subjectKeyIdentifier","hash"),
-			ef.create_extension("extendedKeyUsage","serverAuth"),
-			ef.create_extension("keyUsage","keyEncipherment,dataEncipherment,digitalSignature")
-		]
-		ef.issuer_certificate = cert
-		cert.add_extension ef.create_extension("authorityKeyIdentifier", "keyid:always,issuer:always")
-		cert.sign(key, OpenSSL::Digest::SHA1.new)
+  def swap_sock_ssl_to_plain
+    # Remove references to the SSLSocket and Context
+    self.sock.sslsock.close
+    self.sock.sslsock = nil
+    self.sock.sslctx  = nil
+    self.sock.sslhash = nil
+    self.sock = self.sock.fd
+    self.sock.extend(::Rex::Socket::Tcp)
+  end
 
-		ctx = OpenSSL::SSL::SSLContext.new(:SSLv3)
-		ctx.key = key
-		ctx.cert = cert
+  def generate_ssl_context
 
-		ctx.session_id_context = Rex::Text.rand_text(16)
+    ctx = nil
+    ssl_cert_info = nil
 
-		wlog("Generated SSL certificate for Meterpreter sessions")
+    loop do
 
-		@@ssl_ctx = ctx
+      # Load a custom SSL certificate if one has been specified
+      if self.ssl_cert
+        wlog("Loading custom SSL certificate for Meterpreter session")
+        ssl_cert_info = Rex::Socket::SslTcpServer.ssl_parse_pem(self.ssl_cert)
+        wlog("Loaded custom SSL certificate for Meterpreter session")
+        break
+      end
 
-		end # End of if not @ssl_ctx
-		end # End of mutex.synchronize
+      # Generate a certificate if necessary and cache it
+      if ! @@ssl_cached_cert
+        @@ssl_mutex.synchronize do
+          wlog("Generating SSL certificate for Meterpreter sessions")
+          @@ssl_cached_cert = Rex::Socket::SslTcpServer.ssl_generate_certificate
+          wlog("Generated SSL certificate for Meterpreter sessions")
+        end
+      end
 
-		@@ssl_ctx
-	end
+      # Use the cached certificate
+      ssl_cert_info = @@ssl_cached_cert
+      break
+    end
 
-	##
-	#
-	# Accessors
-	#
-	##
+    # Create a new context for each session
+    ctx = OpenSSL::SSL::SSLContext.new()
+    ctx.key = ssl_cert_info[0]
+    ctx.cert = ssl_cert_info[1]
+    ctx.extra_chain_cert = ssl_cert_info[2]
+    ctx.options = 0
+    ctx.session_id_context = Rex::Text.rand_text(16)
 
-	#
-	# Returns the default timeout that request packets will use when
-	# waiting for a response.
-	#
-	def Client.default_timeout
-		return 300
-	end
+    ctx
+  end
 
-	##
-	#
-	# Alias processor
-	#
-	##
+  ##
+  #
+  # Accessors
+  #
+  ##
 
-	#
-	# Translates unhandled methods into registered extension aliases
-	# if a matching extension alias exists for the supplied symbol.
-	#
-	def method_missing(symbol, *args)
-		#$stdout.puts("method_missing: #{symbol}")
-		self.ext_aliases.aliases[symbol.to_s]
-	end
+  #
+  # Returns the default timeout that request packets will use when
+  # waiting for a response.
+  #
+  def Client.default_timeout
+    return 300
+  end
 
-	##
-	#
-	# Extension registration
-	#
-	##
+  ##
+  #
+  # Alias processor
+  #
+  ##
 
-	#
-	# Loads the client half of the supplied extension and initializes it as a
-	# registered extension that can be reached through client.ext.[extension].
-	#
-	def add_extension(name, commands=[])
-		self.commands |= commands
+  #
+  # Translates unhandled methods into registered extension aliases
+  # if a matching extension alias exists for the supplied symbol.
+  #
+  def method_missing(symbol, *args)
+    #$stdout.puts("method_missing: #{symbol}")
+    self.ext_aliases.aliases[symbol.to_s]
+  end
 
-		# Check to see if this extension has already been loaded.
-		if ((klass = self.class.check_ext_hash(name.downcase)) == nil)
-			old = Rex::Post::Meterpreter::Extensions.constants
-			require("rex/post/meterpreter/extensions/#{name.downcase}/#{name.downcase}")
-			new = Rex::Post::Meterpreter::Extensions.constants
+  ##
+  #
+  # Extension registration
+  #
+  ##
 
-			# No new constants added?
-			if ((diff = new - old).empty?)
-				diff = [ name.capitalize ]
-			end
+  #
+  # Loads the client half of the supplied extension and initializes it as a
+  # registered extension that can be reached through client.ext.[extension].
+  #
+  def add_extension(name, commands=[])
+    self.commands |= commands
 
-			klass = Rex::Post::Meterpreter::Extensions.const_get(diff[0]).const_get(diff[0])
+    # Check to see if this extension has already been loaded.
+    if ((klass = self.class.check_ext_hash(name.downcase)) == nil)
+      old = Rex::Post::Meterpreter::Extensions.constants
+      require("rex/post/meterpreter/extensions/#{name.downcase}/#{name.downcase}")
+      new = Rex::Post::Meterpreter::Extensions.constants
 
-			# Save the module name to class association now that the code is
-			# loaded.
-			self.class.set_ext_hash(name.downcase, klass)
-		end
+      # No new constants added?
+      if ((diff = new - old).empty?)
+        diff = [ name.capitalize ]
+      end
 
-		# Create a new instance of the extension
-		inst = klass.new(self)
+      klass = Rex::Post::Meterpreter::Extensions.const_get(diff[0]).const_get(diff[0])
 
-		self.ext.aliases[inst.name] = inst
+      # Save the module name to class association now that the code is
+      # loaded.
+      self.class.set_ext_hash(name.downcase, klass)
+    end
 
-		return true
-	end
+    # Create a new instance of the extension
+    inst = klass.new(self)
 
-	#
-	# Deregisters an extension alias of the supplied name.
-	#
-	def deregister_extension(name)
-		self.ext.aliases.delete(name)
-	end
+    self.ext.aliases[inst.name] = inst
 
-	#
-	# Enumerates all of the loaded extensions.
-	#
-	def each_extension(&block)
-		self.ext.aliases.each(block)
-	end
+    return true
+  end
 
-	#
-	# Registers an aliased extension that can be referenced through
-	# client.name.
-	#
-	def register_extension_alias(name, ext)
-		self.ext_aliases.aliases[name] = ext
-		# Whee!  Syntactic sugar, where art thou?
-		#
-		# Create an instance method on this object called +name+ that returns
-		# +ext+.  We have to do it this way instead of simply
-		# self.class.class_eval so that other meterpreter sessions don't get
-		# extension methods when this one does
-		(class << self; self; end).class_eval do
-			define_method(name.to_sym) do
-				ext
-			end
-		end
-		ext
-	end
+  #
+  # Deregisters an extension alias of the supplied name.
+  #
+  def deregister_extension(name)
+    self.ext.aliases.delete(name)
+  end
 
-	#
-	# Registers zero or more aliases that are provided in an array.
-	#
-	def register_extension_aliases(aliases)
-		aliases.each { |a|
-			register_extension_alias(a['name'], a['ext'])
-		}
-	end
+  #
+  # Enumerates all of the loaded extensions.
+  #
+  def each_extension(&block)
+    self.ext.aliases.each(block)
+  end
 
-	#
-	# Deregisters a previously registered extension alias.
-	#
-	def deregister_extension_alias(name)
-		self.ext_aliases.aliases.delete(name)
-	end
+  #
+  # Registers an aliased extension that can be referenced through
+  # client.name.
+  #
+  def register_extension_alias(name, ext)
+    self.ext_aliases.aliases[name] = ext
+    # Whee!  Syntactic sugar, where art thou?
+    #
+    # Create an instance method on this object called +name+ that returns
+    # +ext+.  We have to do it this way instead of simply
+    # self.class.class_eval so that other meterpreter sessions don't get
+    # extension methods when this one does
+    (class << self; self; end).class_eval do
+      define_method(name.to_sym) do
+        ext
+      end
+    end
+    ext
+  end
 
-	#
-	# Dumps the extension tree.
-	#
-	def dump_extension_tree()
-		items = []
-		items.concat(self.ext.dump_alias_tree('client.ext'))
-		items.concat(self.ext_aliases.dump_alias_tree('client'))
+  #
+  # Registers zero or more aliases that are provided in an array.
+  #
+  def register_extension_aliases(aliases)
+    aliases.each { |a|
+      register_extension_alias(a['name'], a['ext'])
+    }
+  end
 
-		return items.sort
-	end
+  #
+  # Deregisters a previously registered extension alias.
+  #
+  def deregister_extension_alias(name)
+    self.ext_aliases.aliases.delete(name)
+  end
 
-	#
-	# Encodes (or not) a UTF-8 string
-	#
-	def unicode_filter_encode(str)
-		self.encode_unicode ? Rex::Text.unicode_filter_encode(str) : str
-	end
+  #
+  # Dumps the extension tree.
+  #
+  def dump_extension_tree()
+    items = []
+    items.concat(self.ext.dump_alias_tree('client.ext'))
+    items.concat(self.ext_aliases.dump_alias_tree('client'))
 
-	#
-	# Decodes (or not) a UTF-8 string
-	#
-	def unicode_filter_decode(str)
-		self.encode_unicode ? Rex::Text.unicode_filter_decode(str) : str
-	end
+    return items.sort
+  end
 
-	#
-	# The extension alias under which all extensions can be accessed by name.
-	# For example:
-	#
-	#    client.ext.stdapi
-	#
-	#
-	attr_reader   :ext
-	#
-	# The socket the client is communicating over.
-	#
-	attr_reader   :sock
-	#
-	# The timeout value to use when waiting for responses.
-	#
-	attr_accessor :response_timeout
-	#
-	# Whether to send pings every so often to determine liveness.
-	#
-	attr_accessor :send_keepalives
-	#
-	# Whether this session is alive.  If the socket is disconnected or broken,
-	# this will be false
-	#
-	attr_accessor :alive
-	#
-	# The unique target identifier for this payload
-	#
-	attr_accessor :target_id
-	#
-	# The libraries available to this meterpreter server
-	#
-	attr_accessor :capabilities
-	#
-	# The Connection ID
-	#
-	attr_accessor :conn_id
-	#
-	# The Connect URL
-	#
-	attr_accessor :url
-	#
-	# Use SSL (HTTPS)
-	#
-	attr_accessor :ssl
-	#
-	# The Session Expiration Timeout
-	#
-	attr_accessor :expiration
-	#
-	# The Communication Timeout
-	#
-	attr_accessor :comm_timeout
-	#
-	# The Passive Dispatcher
-	#
-	attr_accessor :passive_dispatcher
-	#
-	# Flag indicating whether to hex-encode UTF-8 file names and other strings
-	#
-	attr_accessor :encode_unicode
-	#
-	# A list of the commands
-	#
-	attr_reader :commands
+  #
+  # Encodes (or not) a UTF-8 string
+  #
+  def unicode_filter_encode(str)
+    self.encode_unicode ? Rex::Text.unicode_filter_encode(str) : str
+  end
+
+  #
+  # Decodes (or not) a UTF-8 string
+  #
+  def unicode_filter_decode(str)
+    self.encode_unicode ? Rex::Text.unicode_filter_decode(str) : str
+  end
+
+  #
+  # The extension alias under which all extensions can be accessed by name.
+  # For example:
+  #
+  #    client.ext.stdapi
+  #
+  #
+  attr_reader   :ext
+  #
+  # The socket the client is communicating over.
+  #
+  attr_reader   :sock
+  #
+  # The timeout value to use when waiting for responses.
+  #
+  attr_accessor :response_timeout
+  #
+  # Whether to send pings every so often to determine liveness.
+  #
+  attr_accessor :send_keepalives
+  #
+  # Whether this session is alive.  If the socket is disconnected or broken,
+  # this will be false
+  #
+  attr_accessor :alive
+  #
+  # The unique target identifier for this payload
+  #
+  attr_accessor :target_id
+  #
+  # The libraries available to this meterpreter server
+  #
+  attr_accessor :capabilities
+  #
+  # The Connection ID
+  #
+  attr_accessor :conn_id
+  #
+  # The Connect URL
+  #
+  attr_accessor :url
+  #
+  # Use SSL (HTTPS)
+  #
+  attr_accessor :ssl
+  #
+  # Use this SSL Certificate (unified PEM)
+  #
+  attr_accessor :ssl_cert
+  #
+  # The Session Expiration Timeout
+  #
+  attr_accessor :expiration
+  #
+  # The Communication Timeout
+  #
+  attr_accessor :comm_timeout
+  #
+  # The total time for retrying connections
+  #
+  attr_accessor :retry_total
+  #
+  # The time to wait between retry attempts
+  #
+  attr_accessor :retry_wait
+  #
+  # The Passive Dispatcher
+  #
+  attr_accessor :passive_dispatcher
+  #
+  # Reference to a session to pivot through
+  #
+  attr_accessor :pivot_session
+  #
+  # Flag indicating whether to hex-encode UTF-8 file names and other strings
+  #
+  attr_accessor :encode_unicode
+  #
+  # A list of the commands
+  #
+  attr_reader :commands
+  #
+  # The timestamp of the last received response
+  #
+  attr_accessor :last_checkin
 
 protected
-	attr_accessor :parser, :ext_aliases # :nodoc:
-	attr_writer   :ext, :sock # :nodoc:
-	attr_writer   :commands # :nodoc:
+  attr_accessor :parser, :ext_aliases # :nodoc:
+  attr_writer   :ext, :sock # :nodoc:
+  attr_writer   :commands # :nodoc:
 end
 
 end; end; end

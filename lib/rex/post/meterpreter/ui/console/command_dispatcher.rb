@@ -14,69 +14,78 @@ module Ui
 ###
 module Console::CommandDispatcher
 
-	include Rex::Ui::Text::DispatcherShell::CommandDispatcher
+  include Rex::Ui::Text::DispatcherShell::CommandDispatcher
 
-	#
-	# The hash of file names to class names after a module has already been
-	# loaded once on the client side.
-	#
-	@@file_hash = {}
+  #
+  # The hash of file names to class names after a module has already been
+  # loaded once on the client side.
+  #
+  @@file_hash = {}
 
-	#
-	# Checks the file name to hash association to see if the module being
-	# requested has already been loaded once.
-	#
-	def self.check_hash(name)
-		@@file_hash[name]
-	end
+  #
+  # Checks the file name to hash association to see if the module being
+  # requested has already been loaded once.
+  #
+  def self.check_hash(name)
+    @@file_hash[name]
+  end
 
-	#
-	# Sets the file path to class name association for future reference.
-	#
-	def self.set_hash(name, klass)
-		@@file_hash[name] = klass
-	end
+  #
+  # Sets the file path to class name association for future reference.
+  #
+  def self.set_hash(name, klass)
+    @@file_hash[name] = klass
+  end
 
-	def initialize(shell)
-		@msf_loaded = nil
-		super
-	end
+  def initialize(shell)
+    @msf_loaded = nil
+    super
+  end
 
-	#
-	# Returns the meterpreter client context.
-	#
-	def client
-		shell.client
-	end
+  #
+  # Returns the meterpreter client context.
+  #
+  def client
+    shell.client
+  end
 
-	#
-	# Returns true if the client has a framework object.
-	#
-	# Used for firing framework session events
-	#
-	def msf_loaded?
-		return @msf_loaded unless @msf_loaded.nil?
-		# if we get here we must not have initialized yet
+  #
+  # Returns the commands that meet the requirements
+  #
+  def filter_commands(all, reqs)
+    all.delete_if do |cmd, _desc|
+      reqs[cmd].any? { |req| !client.commands.include?(req) }
+    end
+  end
 
-		if client.framework
-			# We have a framework instance so the msf libraries should be
-			# available.  Load up the ones we're going to use
-			require 'msf/base/serializer/readable_text'
-		end
-		@msf_loaded = !!(client.framework)
-		@msf_loaded
-	end
+  #
+  # Returns true if the client has a framework object.
+  #
+  # Used for firing framework session events
+  #
+  def msf_loaded?
+    return @msf_loaded unless @msf_loaded.nil?
+    # if we get here we must not have initialized yet
 
-	#
-	# Log that an error occurred.
-	#
-	def log_error(msg)
-		print_error(msg)
+    if client.framework
+      # We have a framework instance so the msf libraries should be
+      # available.  Load up the ones we're going to use
+      require 'msf/base/serializer/readable_text'
+    end
+    @msf_loaded = !!(client.framework)
+    @msf_loaded
+  end
 
-		elog(msg, 'meterpreter')
+  #
+  # Log that an error occurred.
+  #
+  def log_error(msg)
+    print_error(msg)
 
-		dlog("Call stack:\n#{$@.join("\n")}", 'meterpreter')
-	end
+    elog(msg, 'meterpreter')
+
+    dlog("Call stack:\n#{$@.join("\n")}", 'meterpreter')
+  end
 
 end
 

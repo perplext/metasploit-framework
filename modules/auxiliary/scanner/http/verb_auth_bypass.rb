@@ -1,111 +1,95 @@
 ##
-# $Id$
+# This module requires Metasploit: https://metasploit.com/download
+# Current source: https://github.com/rapid7/metasploit-framework
 ##
 
-##
-# This file is part of the Metasploit Framework and may be subject to
-# redistribution and commercial restrictions. Please see the Metasploit
-# web site for more information on licensing and terms of use.
-#   http://metasploit.com/
-##
+class MetasploitModule < Msf::Auxiliary
 
+  # Exploit mixins should be called first
+  include Msf::Exploit::Remote::HttpClient
+  include Msf::Auxiliary::WmapScanDir
+  include Msf::Auxiliary::WmapScanFile
+  # Scanner mixin should be near last
+  include Msf::Auxiliary::Scanner
+  include Msf::Auxiliary::Report
 
-require 'msf/core'
+  def initialize(info = {})
+    super(update_info(info,
+      'Name'          => 'HTTP Verb Authentication Bypass Scanner',
+      'Description'   => %q{
+        This module test for authentication bypass using different HTTP verbs.
+      },
+      'Author'        => ['et [at] metasploit.com'],
+      'License'       => BSD_LICENSE))
 
+    register_options(
+      [
+        OptString.new('TARGETURI', [true,  "The path to test", '/'])
+      ])
+  end
 
-class Metasploit3 < Msf::Auxiliary
+  def run_host(ip)
+    begin
+      test_verbs(ip)
+    rescue ::Rex::ConnectionRefused, ::Rex::HostUnreachable, ::Rex::ConnectionTimeout
+    rescue ::Timeout::Error, ::Errno::EPIPE
+    end
+  end
 
-	# Exploit mixins should be called first
-	include Msf::Exploit::Remote::HttpClient
-	include Msf::Auxiliary::WmapScanDir
-	include Msf::Auxiliary::WmapScanFile
-	# Scanner mixin should be near last
-	include Msf::Auxiliary::Scanner
-	include Msf::Auxiliary::Report
+  def test_verbs(ip)
+    verbs = [ 'HEAD', 'TRACE', 'TRACK', 'Wmap', 'get', 'trace' ]
 
-	def initialize(info = {})
-		super(update_info(info,
-			'Name'   		=> 'HTTP Verb Authentication Bypass Scanner',
-			'Description'	=> %q{
-				This module test for authentication bypass using different HTTP verbs.
+    res = send_request_raw({
+      'uri'          => normalize_uri(target_uri.path),
+      'method'       => 'GET'
+    }, 10)
 
-			},
-			'Author' 		=> [ 'et [at] metasploit.com' ],
-			'License'		=> BSD_LICENSE,
-			'Version'		=> '$Revision$'))
+    return if not res
 
-		register_options(
-			[
-				OptString.new('PATH', [ true,  "The path to test", '/'])
-			], self.class)
-	end
+    if not res.headers['WWW-Authenticate']
+      print_status("#{full_uri} - Authentication not required [#{res.code}]")
+      return
+    end
 
-	# Fingerprint a single host
-	def run_host(ip)
+    auth_code = res.code
 
-		verbs = [
-				'HEAD',
-				'TRACE',
-				'TRACK',
-				'Wmap'
-			]
+    print_status("#{full_uri} - Authentication required: #{res.headers['WWW-Authenticate']} [#{auth_code}]")
 
+    report_note(
+      :host   => ip,
+      :proto  => 'tcp',
+      :sname  => (ssl ? 'https' : 'http'),
+      :port   => rport,
+      :type   => 'WWW_AUTHENTICATE',
+      :data   => "#{target_uri.path} Realm: #{res.headers['WWW-Authenticate']}",
+      :update => :unique_data
+    )
 
-		begin
-			res = send_request_raw({
-				'uri'          => datastore['PATH'],
-				'method'       => 'GET'
-			}, 10)
+    verbs.each do |tv|
+      resauth = send_request_raw({
+        'uri'          => normalize_uri(target_uri.path),
+        'method'       => tv
+      }, 10)
 
-			if res
+      next if not resauth
 
-				auth_code = res.code
+      print_status("#{full_uri} - Testing verb #{tv} [#{resauth.code}]")
 
-				if res.headers['WWW-Authenticate']
-					print_status("#{ip} requires authentication: #{res.headers['WWW-Authenticate']} [#{auth_code}]")
+      if resauth.code != auth_code and resauth.code <= 302
+        print_good("#{full_uri} - Possible authentication bypass with verb #{tv} [#{resauth.code}]")
 
-					report_note(
-						:host	=> ip,
-						:proto => 'tcp',
-						:sname => (ssl ? 'https' : 'http'),
-						:port	=> rport,
-						:type	=> 'WWW_AUTHENTICATE',
-						:data	=> "#{datastore['PATH']} Realm: #{res.headers['WWW-Authenticate']}",
-						:update => :unique_data
-					)
+        # Unable to use report_web_vuln as method is not in list of allowed methods.
 
-					verbs.each do |tv|
-						resauth = send_request_raw({
-							'uri'          => datastore['PATH'],
-							'method'       => tv
-						}, 10)
-
-						if resauth
-							print_status("Testing verb #{tv} resp code: [#{resauth.code}]")
-							if resauth.code != auth_code and resauth.code <= 302
-								print_status("Possible authentication bypass with verb #{tv} code #{resauth.code}")
-
-								# Unable to use report_web_vuln as method is not in list of allowed methods.
-
-								report_note(
-									:host	=> ip,
-									:proto => 'tcp',
-									:sname => (ssl ? 'https' : 'http'),
-									:port	=> rport,
-									:type	=> 'AUTH_BYPASS_VERB',
-									:data	=> "#{datastore['PATH']} Verb: #{tv}",
-									:update => :unique_data
-								)
-
-							end
-						end
-					end
-				else
-					print_status("[#{ip}] Authentication not required. #{datastore['PATH']} #{res.code}")
-				end
-			end
-		rescue ::Rex::ConnectionRefused, ::Rex::HostUnreachable, ::Rex::ConnectionTimeout
-		rescue ::Timeout::Error, ::Errno::EPIPE
-		end
-	end
+        report_note(
+          :host   => ip,
+          :proto  => 'tcp',
+          :sname  => (ssl ? 'https' : 'http'),
+          :port   => rport,
+          :type   => 'AUTH_BYPASS_VERB',
+          :data   => "#{target_uri.path} Verb: #{tv}",
+          :update => :unique_data
+        )
+      end
+    end
+  end
 end

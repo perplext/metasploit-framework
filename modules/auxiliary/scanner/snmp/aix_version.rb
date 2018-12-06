@@ -1,82 +1,73 @@
 ##
-# $Id$
+# This module requires Metasploit: https://metasploit.com/download
+# Current source: https://github.com/rapid7/metasploit-framework
 ##
 
-##
-# This file is part of the Metasploit Framework and may be subject to
-# redistribution and commercial restrictions. Please see the Metasploit
-# web site for more information on licensing and terms of use.
-#   http://metasploit.com/
-##
+class MetasploitModule < Msf::Auxiliary
+  include Msf::Exploit::Remote::SNMPClient
+  include Msf::Auxiliary::Report
+  include Msf::Auxiliary::Scanner
 
+  def initialize
+    super(
+      'Name'        => 'AIX SNMP Scanner Auxiliary Module',
+      'Description' => 'AIX SNMP Scanner Auxiliary Module',
+      'Author'      =>
+        [
+          'Ramon de C Valle',
+          'Adriano Lima <adriano[at]risesecurity.org>',
+        ],
+      'License'     => MSF_LICENSE
+    )
 
-require 'msf/core'
+  end
 
-class Metasploit3 < Msf::Auxiliary
+  def run_host(ip)
+    begin
+      snmp = connect_snmp
 
-	include Msf::Exploit::Remote::SNMPClient
-	include Msf::Auxiliary::Report
-	include Msf::Auxiliary::Scanner
+      value = snmp.get_value('sysDescr.0')
 
-	def initialize
-		super(
-			'Name'        => 'AIX SNMP Scanner Auxiliary Module',
-			'Version'     => '$Revision$',
-			'Description' => 'AIX SNMP Scanner Auxiliary Module',
-			'Author'      =>
-				[
-					'Adriano Lima <adriano[at]risesecurity.org>',
-					'ramon'
-				],
-			'License'     => MSF_LICENSE
-		)
+      if value =~ /AIX/
+        value = value.split("\n")
+        description = value[0].strip
+        value = value[2].split(':')
 
-	end
+        value = value[1].strip
+        value = value.split('.')
 
-	def run_host(ip)
-		begin
-			snmp = connect_snmp
+        value[0] = value[0].to_i
+        value[1] = value[1].to_i
+        value[2] = value[2].to_i
+        value[3] = value[3].to_i
 
-			value = snmp.get_value('sysDescr.0')
+        version = "#{value[0]}.#{value[1]}.#{value[2]}.#{value[3]}"
 
-			if value =~ /AIX/
-				value = value.split("\n")
-				description = value[0].strip
-				value = value[2].split(':')
+        report_note(
+            :host   => ip,
+            :proto => 'udp',
+            :sname  => 'snmp',
+            :port   => datastore['RPORT'],
+            :type   => 'AIX',
+            :data   => version
+        )
 
-				value = value[1].strip
-				value = value.split('.')
+        status = "#{ip} (#{description}) is running: "
+        status << "IBM AIX Version #{value[0]}.#{value[1]}.#{value[3]} "
+        status << "(#{version})"
 
-				value[0] = value[0].to_i
-				value[1] = value[1].to_i
-				value[2] = value[2].to_i
-				value[3] = value[3].to_i
+        print_status(status)
+      end
 
-				version = "#{value[0]}.#{value[1]}.#{value[2]}.#{value[3]}"
+    # No need to make noise about timeouts
+    rescue ::Rex::ConnectionError, ::SNMP::RequestTimeout, ::SNMP::UnsupportedVersion
+    rescue ::Interrupt
+      raise $!
+    rescue Exception => e
+      print_error("#{ip} #{e.class}, #{e.message}")
+    ensure
+      disconnect_snmp
+    end
 
-				report_note(
-						:host   => ip,
-						:proto => 'udp',
-						:sname  => 'snmp',
-						:port   => datastore['RPORT'],
-						:type   => 'AIX',
-						:data   => version
-				)
-
-				status = "#{ip} (#{description}) is running: "
-				status << "IBM AIX Version #{value[0]}.#{value[1]}.#{value[3]} "
-				status << "(#{version})"
-
-				print_status(status)
-			end
-
-			disconnect_snmp
-
-		rescue Exception => e
-			print_error("#{e.class}, #{e.message}")
-
-		end
-
-	end
-
+  end
 end

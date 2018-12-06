@@ -1,81 +1,96 @@
 ##
-# $Id$
+# This module requires Metasploit: https://metasploit.com/download
+# Current source: https://github.com/rapid7/metasploit-framework
 ##
 
-##
-# This file is part of the Metasploit Framework and may be subject to
-# redistribution and commercial restrictions. Please see the Metasploit
-# web site for more information on licensing and terms of use.
-#   http://metasploit.com/
-##
+class MetasploitModule < Msf::Auxiliary
+  include Msf::Exploit::Remote::Ftp
+  include Msf::Auxiliary::Scanner
+  include Msf::Auxiliary::Report
 
+  def initialize
+    super(
+      'Name'        => 'Anonymous FTP Access Detection',
+      'Description' => 'Detect anonymous (read/write) FTP server access.',
+      'References'  =>
+        [
+          ['URL', 'http://en.wikipedia.org/wiki/File_Transfer_Protocol#Anonymous_FTP'],
+        ],
+      'Author'      => 'Matteo Cantoni <goony[at]nothink.org>',
+      'License'     => MSF_LICENSE
+    )
 
-require 'msf/core'
+    register_options(
+      [
+        Opt::RPORT(21),
+      ])
+  end
 
+  def run_host(target_host)
 
-class Metasploit3 < Msf::Auxiliary
+    begin
 
-	include Msf::Exploit::Remote::Ftp
-	include Msf::Auxiliary::Scanner
-	include Msf::Auxiliary::Report
+      res = connect_login(true, false)
 
-	def initialize
-		super(
-			'Name'        => 'Anonymous FTP Access Detection',
-			'Version'     => '$Revision$',
-			'Description' => 'Detect anonymous (read/write) FTP server access.',
-			'References'  =>
-				[
-					['URL', 'http://en.wikipedia.org/wiki/File_Transfer_Protocol#Anonymous_FTP'],
-				],
-			'Author'      => 'Matteo Cantoni <goony[at]nothink.org>',
-			'License'     => MSF_LICENSE
-		)
+      banner.strip! if banner
 
-		register_options(
-			[
-				Opt::RPORT(21),
-			], self.class)
-	end
+      dir = Rex::Text.rand_text_alpha(8)
+      if res
+        write_check = send_cmd(['MKD', dir] , true)
 
-	def run_host(target_host)
+        if write_check && write_check =~ /^2/
+          send_cmd( ['RMD', dir] , true)
 
-		begin
+          print_good("#{target_host}:#{rport} - Anonymous READ/WRITE (#{banner})")
+          access_type = 'Read/Write'
+        else
+          print_good("#{target_host}:#{rport} - Anonymous READ (#{banner})")
+          access_type = 'Read-only'
+        end
+        register_creds(target_host, access_type)
+      end
 
-		res = connect_login(true, false)
+      disconnect
 
-		banner.strip! if banner
+    rescue ::Interrupt
+      raise $ERROR_INFO
+    rescue ::Rex::ConnectionError, ::IOError
+    end
+  end
 
-		dir = Rex::Text.rand_text_alpha(8)
-		if res
-			write_check = send_cmd( ['MKD', dir] , true)
+  def register_creds(target_host, access_type)
+    # Build service information
+    service_data = {
+      address: target_host,
+      port: datastore['RPORT'],
+      service_name: 'ftp',
+      protocol: 'tcp',
+      workspace_id: myworkspace_id
+    }
 
-			if (write_check and write_check =~ /^2/)
-				send_cmd( ['RMD', dir] , true)
+    # Build credential information
+    credential_data = {
+      origin_type: :service,
+      module_fullname: self.fullname,
+      private_data: datastore['FTPPASS'],
+      private_type: :password,
+      username: datastore['FTPUSER'],
+      workspace_id: myworkspace_id
+    }
 
-				print_status("#{target_host}:#{rport} Anonymous READ/WRITE (#{banner})")
-				access_type = "rw"
-			else
-				print_status("#{target_host}:#{rport} Anonymous READ (#{banner})")
-				access_type = "ro"
-			end
-			report_auth_info(
-				:host   => target_host,
-				:port   => rport,
-				:sname  => 'ftp',
-				:user   => datastore['FTPUSER'],
-				:pass   => datastore['FTPPASS'],
-				:type  => "password_#{access_type}",
-				:active => true
-			)
-		end
+    credential_data.merge!(service_data)
+    credential_core = create_credential(credential_data)
 
-		disconnect
+    # Assemble the options hash for creating the Metasploit::Credential::Login object
+    login_data = {
+      access_level: access_type,
+      core: credential_core,
+      last_attempted_at: DateTime.now,
+      status: Metasploit::Model::Login::Status::SUCCESSFUL,
+      workspace_id: myworkspace_id
+    }
 
-		rescue ::Interrupt
-			raise $!
-		rescue ::Rex::ConnectionError, ::IOError
-		end
-
-	end
+    login_data.merge!(service_data)
+    create_credential_login(login_data)
+  end
 end

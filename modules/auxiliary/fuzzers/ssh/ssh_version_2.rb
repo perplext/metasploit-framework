@@ -1,95 +1,84 @@
 ##
-# $Id$
+# This module requires Metasploit: https://metasploit.com/download
+# Current source: https://github.com/rapid7/metasploit-framework
 ##
 
-##
-# This file is part of the Metasploit Framework and may be subject to
-# redistribution and commercial restrictions. Please see the Metasploit
-# web site for more information on licensing and terms of use.
-#   http://metasploit.com/
-##
+class MetasploitModule < Msf::Auxiliary
+  include Msf::Exploit::Remote::Tcp
+  include Msf::Auxiliary::Fuzzer
 
-require 'msf/core'
+  def initialize(info = {})
+    super(update_info(info,
+      'Name'           => 'SSH 2.0 Version Fuzzer',
+      'Description'    => %q{
+        This module sends a series of SSH requests with malicious version strings.
+      },
+      'Author'         => [ 'hdm' ],
+      'License'        => MSF_LICENSE
+    ))
+    register_options([
+      Opt::RPORT(22)
+    ])
+  end
 
+  def do_ssh_version(pkt,opts={})
+    @connected = false
+    connect
+    @connected = true
 
-class Metasploit3 < Msf::Auxiliary
+    @banner = sock.get_once(-1,opts[:banner_timeout])
+    return if not @banner
+    sock.put("#{pkt}\r\n")
+  end
 
-	include Msf::Exploit::Remote::Tcp
-	include Msf::Auxiliary::Fuzzer
+  def run
+    last_str = nil
+    last_inp = nil
+    last_err = nil
 
-	def initialize(info = {})
-		super(update_info(info,
-			'Name'           => 'SSH 2.0 Version Fuzzer',
-			'Description'    => %q{
-				This module sends a series of SSH requests with malicious version strings.
-			},
-			'Author'         => [ 'hdm' ],
-			'License'        => MSF_LICENSE,
-			'Version'        => '$Revision$'
-		))
-		register_options([
-			Opt::RPORT(22)
-		], self.class)
-	end
+    ver = make_ssh_version_base
+    cnt = 0
 
-	def do_ssh_version(pkt,opts={})
-		@connected = false
-		connect
-		@connected = true
+    fuzz_strings do |str|
+      cnt += 1
 
-		@banner = sock.get_once(-1,opts[:banner_timeout])
-		return if not @banner
-		sock.put("#{pkt}\r\n")
-	end
+      pkt = ver + str
 
-	def run
-		last_str = nil
-		last_inp = nil
-		last_err = nil
+      if(cnt % 100 == 0)
+        print_status("Fuzzing with iteration #{cnt} using #{@last_fuzzer_input}")
+      end
 
-		ver = make_ssh_version_base
-		cnt = 0
+      begin
+        r = do_ssh_version(str,:banner_timeout => 5)
+      rescue ::Interrupt
+        print_status("Exiting on interrupt: iteration #{cnt} using #{@last_fuzzer_input}")
+        raise $!
+      rescue ::Exception => e
+        last_err = e
+      ensure
+        disconnect
+      end
 
-		fuzz_strings do |str|
-			cnt += 1
+      if(not @connected)
+        if(last_str)
+          print_status("The service may have crashed: iteration:#{cnt-1} method=#{last_inp} string=#{last_str.unpack("H*")[0]} error=#{last_err}")
+        else
+          print_status("Could not connect to the service: #{last_err}")
+        end
+        return
+      end
 
-			pkt = ver + str
+      if(not @banner)
+        print_status("The service may have crashed (no banner): iteration:#{cnt-1} method=#{last_inp} string=#{last_str.unpack("H*")[0]} ")
+        return
+      end
 
-			if(cnt % 100 == 0)
-				print_status("Fuzzing with iteration #{cnt} using #{@last_fuzzer_input}")
-			end
+      last_str = str
+      last_inp = @last_fuzzer_input
+    end
+  end
 
-			begin
-				r = do_ssh_version(str,:banner_timeout => 5)
-			rescue ::Interrupt
-				print_status("Exiting on interrupt: iteration #{cnt} using #{@last_fuzzer_input}")
-				raise $!
-			rescue ::Exception => e
-				last_err = e
-			ensure
-				disconnect
-			end
-
-			if(not @connected)
-				if(last_str)
-					print_status("The service may have crashed: iteration:#{cnt-1} method=#{last_inp} string=#{last_str.unpack("H*")[0]} error=#{last_err}")
-				else
-					print_status("Could not connect to the service: #{last_err}")
-				end
-				return
-			end
-
-			if(not @banner)
-				print_status("The service may have crashed (no banner): iteration:#{cnt-1} method=#{last_inp} string=#{last_str.unpack("H*")[0]} ")
-				return
-			end
-
-			last_str = str
-			last_inp = @last_fuzzer_input
-		end
-	end
-
-	def make_ssh_version_base
-		"SSH-2.0-"
-	end
+  def make_ssh_version_base
+    "SSH-2.0-"
+  end
 end

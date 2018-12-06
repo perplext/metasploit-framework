@@ -1,224 +1,85 @@
 # -*- coding: binary -*-
-require 'msf/core'
-require 'msf/core/module'
 
-module Msf
-class Post < Msf::Module
+#
+# A Post-exploitation module
+#
+class Msf::Post < Msf::Module
 
-	include Msf::Auxiliary::Report
+  require 'msf/core/post/common'
+  require 'msf/core/post_mixin'
 
-	include Msf::Module::HasActions
+  require 'msf/core/post/file'
+  require 'msf/core/post/webrtc'
 
-	def self.type
-		MODULE_POST
-	end
-	def type
-		MODULE_POST
-	end
+  require 'msf/core/post/linux'
+  require 'msf/core/post/osx'
+  require 'msf/core/post/solaris'
+  require 'msf/core/post/unix'
+  require 'msf/core/post/windows'
+  require 'msf/core/post/android'
+  require 'msf/core/post/hardware'
 
-	def initialize(info={})
-		super
+  class Complete < RuntimeError
+  end
 
-		register_options( [
-			OptInt.new('SESSION', [ true, "The session to run this module on." ])
-		] , Msf::Post)
+  class Failed < RuntimeError
+  end
 
-		# Default stance is active
-		self.passive = (info['Passive'] and info['Passive'] == true) || false
-	end
+  include Msf::PostMixin
 
-	#
-	# Grabs a session object from the framework or raises OptionValidateError
-	# if one doesn't exist.  Initializes user input and output on the session.
-	#
-	def setup
-		@sysinfo = nil
-		if not session
-			raise Msf::OptionValidateError.new(["SESSION"])
-		end
-		check_for_session_readiness() if session.type == "meterpreter"
+  def setup
+    m = replicant
 
-		@session.init_ui(self.user_input, self.user_output)
-	end
+    if m.actions.length > 0 && !m.action
+      raise Msf::MissingActionError, "Please use: #{m.actions.collect {|e| e.name} * ", "}"
+    end
 
-	# Meterpreter sometimes needs a little bit of extra time to
-	# actually be responsive for post modules. Default tries
-	# and retries for 5 seconds.
-	def check_for_session_readiness(tries=6)
-		session_ready_count = 0
-		session_ready = false
-		until session.sys or session_ready_count > tries
-			session_ready_count += 1
-			back_off_period = (session_ready_count**2)/10.0
-			select(nil,nil,nil,back_off_period)
-		end
-		session_ready = !!session.sys
-		raise "Could not get a hold of the session." unless session_ready
-		return session_ready
-	end
+    # Msf::Module(Msf::PostMixin)#setup
+    super
+  end
 
-	#
-	# Default cleanup handler does nothing
-	#
-	def cleanup
-	end
+  def type
+    Msf::MODULE_POST
+  end
 
-	#
-	# Return the associated session or nil if there isn't one
-	#
-	def session
-		# Try the cached one
-		return @session if @session and not session_changed?
+  def self.type
+    Msf::MODULE_POST
+  end
 
-		if datastore["SESSION"]
-			@session = framework.sessions[datastore["SESSION"].to_i]
-		else
-			@session = nil
-		end
+  #
+  # Create an anonymous module not tied to a file.  Only useful for IRB.
+  #
+  def self.create(session)
+    mod = new
+    mod.instance_variable_set(:@session, session)
+    # Have to override inspect because for whatever reason, +type+ is coming
+    # from the wrong scope and i can't figure out how to fix it.
+    mod.instance_eval do
+      def inspect
+        "#<Msf::Post anonymous>"
+      end
+    end
+    mod.class.refname = "anonymous"
 
-		@session
-	end
+    mod
+  end
 
-	alias :client :session
+  # This method returns the ID of the Mdm::Session that the post module
+  # is currently running against.
+  #
+  # @return [NilClass] if there is no database record for the session
+  # @return [Integer] if there is a database record to get the id for
+  def session_db_id
+    if session.db_record
+      session.db_record.id
+    else
+      nil
+    end
+  end
 
-	#
-	# Cached sysinfo, returns nil for non-meterpreter sessions
-	#
-	def sysinfo
-		begin
-			@sysinfo ||= session.sys.config.sysinfo
-		rescue NoMethodError
-			@sysinfo = nil
-		end
-		@sysinfo
-	end
+  # Override Msf::Module#fail_with for Msf::Simple::Post::job_run_proc
+  def fail_with(reason, msg = nil)
+    raise Msf::Post::Failed, "#{reason.to_s}: #{msg}"
+  end
 
-	#
-	# Can be overridden by individual modules to add new commands
-	#
-	def post_commands
-		{}
-	end
-
-	def passive?
-		self.passive
-	end
-
-	#
-	# Return a (possibly empty) list of all compatible sessions
-	#
-	def compatible_sessions
-		sessions = []
-		framework.sessions.each do |sid, s|
-			sessions << sid if session_compatible?(s)
-		end
-		sessions
-	end
-
-	#
-	# Create an anonymous module not tied to a file.  Only useful for IRB.
-	#
-	def self.create(session)
-		mod = new
-		mod.instance_variable_set(:@session, session)
-		# Have to override inspect because for whatever reason, +type+ is coming
-		# from the wrong scope and i can't figure out how to fix it.
-		mod.instance_eval do
-			def inspect
-				"#<Msf::Post anonymous>"
-			end
-		end
-		mod.class.refname = "anonymous"
-
-		mod
-	end
-
-	#
-	# Return false if the given session is not compatible with this module
-	#
-	# Checks the session's type against this module's
-	# +module_info["SessionTypes"]+ as well as examining platform
-	# compatibility.  +sess_or_sid+ can be a Session object, Fixnum, or String.
-	# In the latter cases it sould be a key in in +framework.sessions+.
-	#
-	# NOTE: because it errs on the side of compatibility, a true return value
-	# from this method does not guarantee the module will work with the
-	# session.
-	#
-	def session_compatible?(sess_or_sid)
-		# Normalize the argument to an actual Session
-		case sess_or_sid
-		when ::Fixnum, ::String
-			s = framework.sessions[sess_or_sid.to_i]
-		when ::Msf::Session
-			s = sess_or_sid
-		end
-
-		# Can't do anything without a session
-		return false if s.nil?
-
-		# Can't be compatible if it's the wrong type
-		if self.module_info["SessionTypes"]
-			return false unless self.module_info["SessionTypes"].include?(s.type)
-		end
-
-		# XXX: Special-case java and php for now.  This sucks and Session
-		# should have a method to auto-detect the underlying platform of
-		# platform-independent sessions such as these.
-		plat = s.platform
-		if plat =~ /php|java/ and sysinfo and sysinfo["OS"]
-			plat = sysinfo["OS"]
-		end
-
-		# Types are okay, now check the platform.  This is kind of a ghetto
-		# workaround for session platforms being ad-hoc and Platform being
-		# inflexible.
-		if self.platform and self.platform.kind_of?(Msf::Module::PlatformList)
-			[
-				# Add as necessary
-				"win", "linux", "osx"
-			].each do |name|
-				if plat =~ /#{name}/
-					p = Msf::Module::PlatformList.transform(name)
-					return false unless self.platform.supports? p
-				end
-			end
-		elsif self.platform and self.platform.kind_of?(Msf::Module::Platform)
-			p_klass = Msf::Module::Platform
-			case plat.downcase
-			when /win/
-				return false unless self.platform.kind_of?(p_klass::Windows)
-			when /osx/
-				return false unless self.platform.kind_of?(p_klass::OSX)
-			when /linux/
-				return false unless self.platform.kind_of?(p_klass::Linux)
-			end
-		end
-
-		# If we got here, we haven't found anything that definitely
-		# disqualifies this session.  Assume that means we can use it.
-		return true
-	end
-
-	#
-	# True when this module is passive, false when active
-	#
-	attr_reader :passive
-
-protected
-
-	attr_writer :passive
-
-	def session_changed?
-		@ds_session ||= datastore["SESSION"]
-
-		if (@ds_session != datastore["SESSION"])
-			@ds_session = nil
-			return true
-		else
-			return false
-		end
-	end
 end
-end
-

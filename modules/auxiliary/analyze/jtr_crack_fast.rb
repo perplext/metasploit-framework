@@ -1,162 +1,134 @@
 ##
-# $Id$
+# This module requires Metasploit: https://metasploit.com/download
+# Current source: https://github.com/rapid7/metasploit-framework
 ##
 
-##
-# This file is part of the Metasploit Framework and may be subject to
-# redistribution and commercial restrictions. Please see the Metasploit
-# web site for more information on licensing and terms of use.
-#   http://metasploit.com/
-#
-##
+require 'msf/core/auxiliary/jtr'
 
+class MetasploitModule < Msf::Auxiliary
+  include Msf::Auxiliary::JohnTheRipper
 
-require 'msf/core'
+  def initialize
+    super(
+      'Name'        => 'John the Ripper Password Cracker (Fast Mode)',
+      'Description' => %Q{
+          This module uses John the Ripper to identify weak passwords that have been
+        acquired as hashed files (loot) or raw LANMAN/NTLM hashes (hashdump). The goal
+        of this module is to find trivial passwords in a short amount of time. To
+        crack complex passwords or use large wordlists, John the Ripper should be
+        used outside of Metasploit. This initial version just handles LM/NTLM credentials
+        from hashdump and uses the standard wordlist and rules.
+      },
+      'Author'      => 'hdm',
+      'License'     => MSF_LICENSE  # JtR itself is GPLv2, but this wrapper is MSF (BSD)
+    )
+  end
 
-class Metasploit3 < Msf::Auxiliary
+  def run
+    cracker = new_john_cracker
 
-	include Msf::Auxiliary::JohnTheRipper
+    # generate our wordlist and close the file handle
+    wordlist = wordlist_file
+    unless wordlist
+      print_error('This module cannot run without a database connected. Use db_connect to connect to a database.')
+      return
+    end
 
-	def initialize
-		super(
-			'Name'				=> 'John the Ripper Password Cracker (Fast Mode)',
-			'Version'           => '$Revision$',
-			'Description'       => %Q{
-					This module uses John the Ripper to identify weak passwords that have been
-				acquired as hashed files (loot) or raw LANMAN/NTLM hashes (hashdump). The goal
-				of this module is to find trivial passwords in a short amount of time. To
-				crack complex passwords or use large wordlists, John the Ripper should be
-				used outside of Metasploit. This initial version just handles LM/NTLM credentials
-				from hashdump and uses the standard wordlist and rules.
-			},
-			'Author'			=> 'hdm',
-			'License'			=> MSF_LICENSE  # JtR itself is GPLv2, but this wrapper is MSF (BSD)
-		)
-	end
+    wordlist.close
+    print_status "Wordlist file written out to #{wordlist.path}"
+    cracker.wordlist = wordlist.path
+    cracker.hash_path = hash_file
 
-	def run
-		wordlist = Rex::Quickfile.new("jtrtmp")
-		hashlist = Rex::Quickfile.new("jtrtmp")
+    ['lm','nt'].each do |format|
+      # dupe our original cracker so we can safely change options between each run
+      cracker_instance = cracker.dup
+      cracker_instance.format = format
+      print_status "Cracking #{format} hashes in normal wordlist mode..."
+      # Turn on KoreLogic rules if the user asked for it
+      if datastore['KoreLogic']
+        cracker_instance.rules = 'KoreLogicRules'
+        print_status "Applying KoreLogic ruleset..."
+      end
+      cracker_instance.crack do |line|
+        print_status line.chomp
+      end
 
-		begin
-			# Seed the wordlist with usernames, passwords, and hostnames
-			seed = []
+      print_status "Cracking #{format} hashes in single mode..."
+      cracker_instance.rules = 'single'
+      cracker_instance.crack do |line|
+        print_status line.chomp
+      end
 
-			myworkspace.hosts.find(:all).each {|o| seed << john_expand_word( o.name ) if o.name }
-			myworkspace.creds.each do |o|
-				seed << john_expand_word( o.user ) if o.user
-				seed << john_expand_word( o.pass ) if (o.pass and o.ptype !~ /hash/)
-			end
+      if format == 'lm'
+        print_status "Cracking #{format} hashes in incremental mode (All4)..."
+        cracker_instance.rules = nil
+        cracker_instance.wordlist = nil
+        cracker_instance.incremental = 'All4'
+        cracker_instance.crack do |line|
+          print_status line.chomp
+        end
+      end
 
-			# Grab any known passwords out of the john.pot file
-			john_cracked_passwords.values {|v| seed << v }
+      print_status "Cracking #{format} hashes in incremental mode (Digits)..."
+      cracker_instance.rules = nil
+      cracker_instance.wordlist = nil
+      cracker_instance.incremental = 'Digits'
+      cracker_instance.crack do |line|
+        print_status line.chomp
+      end
 
-			# Write the seed file
-			wordlist.write( seed.flatten.uniq.join("\n") + "\n" )
+      print_status "Cracked Passwords this run:"
+      cracker_instance.each_cracked_password do |password_line|
+        password_line.chomp!
+        next if password_line.blank?
 
-			print_status("Seeded the password database with #{seed.length} words...")
+        fields = password_line.split(":")
+        # If we don't have an expected minimum number of fields, this is probably not a hash line
+        next unless fields.count >=7
+        username = fields.shift
+        core_id = fields.pop
 
-			# Append the standard JtR wordlist as well
-			::File.open(john_wordlist_path, "rb") do |fd|
-				wordlist.write fd.read(fd.stat.size)
-			end
+        # pop off dead space here
+        2.times{ fields.pop }
 
-			# Close the wordlist to prevent sharing violations (windows)
-			wordlist.close
+        # get the NT and LM hashes
+        nt_hash = fields.pop
+        lm_hash = fields.pop
+        password = fields.join(':')
 
-			# Create a PWDUMP style input file for SMB Hashes
-			smb_hashes = myworkspace.creds.select{|x| x.ptype == "smb_hash" }
-			smb_hashes.each do |cred|
-				hashlist.write( "cred_#{cred[:id]}:#{cred[:id]}:#{cred[:pass]}:::\n" )
-			end
-			hashlist.close
+        if format == 'lm'
+          if password.blank?
+            if nt_hash == Metasploit::Credential::NTLMHash::BLANK_NT_HASH
+              password = ''
+            else
+              next
+            end
+          end
+          password = john_lm_upper_to_ntlm(password, nt_hash)
+          # password can be nil if the hash is broken (i.e., the NT and
+          # LM sides don't actually match) or if john was only able to
+          # crack one half of the LM hash. In the latter case, we'll
+          # have a line like:
+          #  username:???????WORD:...:...:::
+          next if password.nil?
+        end
 
-			if smb_hashes.length > 0
-				cracked_ntlm = {}
-				cracked_lm   = {}
-				added        = []
+        print_good "#{username}:#{password}:#{core_id}"
+        create_cracked_credential( username: username, password: password, core_id: core_id)
+      end
+    end
+  end
 
-				# Crack this in LANMAN format using wordlist mode with tweaked rules
-				john_crack(hashlist.path, :wordlist => wordlist.path, :rules => 'single', :format => 'lm')
-
-				# Crack this in LANMAN format using various incremntal modes
-				john_crack(hashlist.path, :incremental => "All4", :format => 'lm')
-				john_crack(hashlist.path, :incremental => "Digits5", :format => 'lm')
-
-				# Parse cracked passwords and permute LANMAN->NTLM as needed
-				cracked = john_show_passwords(hashlist.path, 'lm')
-				cracked[:users].each_pair do |k,v|
-					next if v == ""
-					next if (v[0,7] == "???????" or v[7,7] == "???????")
-					next if not k =~ /^cred_(\d+)/m
-					cid  = $1.to_i
-
-					cracked_lm[k] = v
-
-					cred_find = smb_hashes.select{|x| x[:id] == cid}
-					next if cred_find.length == 0
-
-					cred = cred_find.first
-					ntlm = cred.pass.split(":", 2).last
-					done = john_lm_upper_to_ntlm(v, ntlm)
-					cracked_ntlm[k] = done if done
-				end
-
-				# Append any cracked values to the wordlist
-				tfd = ::File.open(wordlist.path, "ab")
-				cracked_lm.values.each   {|w| if not added.include?(w); tfd.write( w + "\n" ); added << w; end }
-				cracked_ntlm.values.each {|w| if not added.include?(w); tfd.write( w + "\n" ); added << w; end }
-				tfd.close
-
-				# Crack this in NTLM format
-				john_crack(hashlist.path, :wordlist => wordlist.path, :rules => 'single', :format => 'nt')
-
-				# Crack this in NTLM format using various incremntal modes
-				john_crack(hashlist.path, :incremental => "All4", :format => 'nt')
-				john_crack(hashlist.path, :incremental => "Digits5", :format => 'nt')
-
-				# Parse cracked passwords
-				cracked = john_show_passwords(hashlist.path, 'nt')
-				cracked[:users].each_pair do |k,v|
-					next if cracked_ntlm[k]
-					cracked_ntlm[k] = v
-				end
-
-				# Append any cracked values to the wordlist
-				tfd = ::File.open(wordlist.path, "ab")
-				cracked_ntlm.values.each {|w| if not added.include?(w); tfd.write( w + "\n" ); added << w; end }
-				tfd.close
-
-				# Store the cracked results based on user_id => cred.id
-				cracked_ntlm.each_pair do |k,v|
-					next if not k =~ /^cred_(\d+)/m
-					cid = $1.to_i
-
-					cred_find = smb_hashes.select{|x| x[:id] == cid}
-					next if cred_find.length == 0
-					cred = cred_find.first
-
-					print_good("Cracked: #{cred.user}:#{v} (#{cred.service.host.address}:#{cred.service.port})")
-					report_auth_info(
-						:host  => cred.service.host,
-						:service => cred.service,
-						:user  => cred.user,
-						:pass  => v,
-						:type  => "password",
-						:source_id   => cred[:id],
-						:source_type => 'cracked'
-					)
-				end
-			end
-
-			# XXX: Enter other hash types here (shadow, etc)
-
-		rescue ::Timeout::Error
-		ensure
-			wordlist.close rescue nil
-			hashlist.close rescue nil
-			::File.unlink(wordlist.path) rescue nil
-			::File.unlink(hashlist.path) rescue nil
-		end
-	end
+  def hash_file
+    hashlist = Rex::Quickfile.new("hashes_tmp")
+    framework.db.creds(workspace: myworkspace, type: 'Metasploit::Credential::NTLMHash').each do |core|
+      user = core.public.username
+      hash_string = core.private.data
+      id = core.id
+      hashlist.puts "#{user}:#{id}:#{hash_string}:::#{id}"
+    end
+    hashlist.close
+    print_status "Hashes Written out to #{hashlist.path}"
+    hashlist.path
+  end
 end

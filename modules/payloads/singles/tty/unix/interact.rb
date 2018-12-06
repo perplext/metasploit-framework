@@ -1,41 +1,33 @@
 ##
-# $Id$
+# This module requires Metasploit: https://metasploit.com/download
+# Current source: https://github.com/rapid7/metasploit-framework
 ##
 
-##
-# This file is part of the Metasploit Framework and may be subject to
-# redistribution and commercial restrictions. Please see the Metasploit
-# web site for more information on licensing and terms of use.
-#   http://metasploit.com/
-##
-
-
-require 'msf/core'
 require 'msf/core/handler/find_tty'
 require 'msf/base/sessions/command_shell'
 
 
-module Metasploit3
+module MetasploitModule
 
-	include Msf::Payload::Single
+  CachedSize = 0
 
-	def initialize(info = {})
-		super(merge_info(info,
-			'Name'          => 'Unix TTY, Interact with established connection',
-			'Version'       => '$Revision$',
-			'Description'   => 'Interacts with a TTY on an established socket connection',
-			'Author'        => 'hdm',
-			'License'       => MSF_LICENSE,
-			'Platform'      => 'unix',
-			'Arch'          => ARCH_TTY,
-			'Handler'       => Msf::Handler::FindTty,
-			'Session'       => Msf::Sessions::TTY,
-			'Payload'       =>
-				{
-					'Offsets' => { },
-					'Payload' => ''
-				}
-			))
-	end
+  include Msf::Payload::Single
 
+  def initialize(info = {})
+    super(merge_info(info,
+      'Name'          => 'Unix TTY, Interact with Established Connection',
+      'Description'   => 'Interacts with a TTY on an established socket connection',
+      'Author'        => 'hdm',
+      'License'       => MSF_LICENSE,
+      'Platform'      => 'unix',
+      'Arch'          => ARCH_TTY,
+      'Handler'       => Msf::Handler::FindTty,
+      'Session'       => Msf::Sessions::TTY,
+      'Payload'       =>
+        {
+          'Offsets' => { },
+          'Payload' => ''
+        }
+      ))
+  end
 end

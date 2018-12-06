@@ -1,43 +1,29 @@
 ##
-# $Id$
+# This module requires Metasploit: https://metasploit.com/download
+# Current source: https://github.com/rapid7/metasploit-framework
 ##
 
-##
-# This file is part of the Metasploit Framework and may be subject to
-# redistribution and commercial restrictions. Please see the Metasploit
-# web site for more information on licensing and terms of use.
-#   http://metasploit.com/
-##
+class MetasploitModule < Msf::Post
 
-require 'msf/core'
-require 'rex'
-require 'msf/core/post/common'
+  def initialize(info={})
+    super( update_info( info,
+      'Name'          => 'Multi Generic Operating System Session Command Execution',
+      'Description'   => %q{ This module executes an arbitrary command line},
+      'License'       => MSF_LICENSE,
+      'Author'        => [ 'hdm' ],
+      'Platform'      => %w{ linux osx unix win },
+      'SessionTypes'  => [ 'shell', 'meterpreter' ]
+    ))
+    register_options(
+      [
+        OptString.new( 'COMMAND', [false, 'The entire command line to execute on the session'])
+      ])
+  end
 
-class Metasploit3 < Msf::Post
+  def run
+    print_status("Executing #{datastore['COMMAND']} on #{session.inspect}...")
+    res = cmd_exec(datastore['COMMAND'])
+    print_status("Response: #{res}")
 
-	include Msf::Post::Common
-
-	def initialize(info={})
-		super( update_info( info,
-			'Name'          => 'Multi Generic Operating System Session Command Execution',
-			'Description'   => %q{ This module executes an arbitrary command line},
-			'License'       => MSF_LICENSE,
-			'Author'        => [ 'hdm' ],
-			'Version'       => '$Revision$',
-			'Platform'      => [ 'linux', 'windows', 'unix', 'osx' ],
-			'SessionTypes'  => [ 'shell', 'meterpreter' ]
-		))
-		register_options(
-			[
-				OptString.new( 'COMMAND', [false, 'The entire command line to execute on the session'])
-			], self.class)
-	end
-
-	def run
-		print_status("Executing #{datastore['COMMAND']} on #{session.inspect}...")
-		res = cmd_exec(datastore['COMMAND'])
-		print_status("Response: #{res}")
-
-	end
-
+  end
 end

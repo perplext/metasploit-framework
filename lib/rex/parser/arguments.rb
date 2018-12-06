@@ -1,108 +1,95 @@
 # -*- coding: binary -*-
+# frozen_string_literal: true
 require 'shellwords'
 
 module Rex
-module Parser
+  module Parser
+    ###
+    #
+    # This class parses arguments in a getopt style format, kind of.
+    # Unfortunately, the default ruby getopt implementation will only
+    # work on ARGV, so we can't use it.
+    #
+    ###
+    class Arguments
+      #
+      # Initializes the format list with an array of formats like:
+      #
+      # Arguments.new(
+      #    '-b' => [ false, "some text" ]
+      # )
+      #
+      def initialize(fmt)
+        self.fmt = fmt
+        self.longest = fmt.keys.max_by(&:length)
+      end
 
-###
-#
-# This class parses arguments in a getopt style format, kind of.
-# Unfortunately, the default ruby getopt implementation will only
-# work on ARGV, so we can't use it.
-#
-###
-class Arguments
+      #
+      # Takes a string and converts it into an array of arguments.
+      #
+      def self.from_s(str)
+        Shellwords.shellwords(str)
+      end
 
-	#
-	# Specifies that an option is expected to have an argument
-	#
-	HasArgument = (1 << 0)
+      #
+      # Parses the supplied arguments into a set of options.
+      #
+      def parse(args, &_block)
+        skip_next = false
 
-	#
-	# Initializes the format list with an array of formats like:
-	#
-	# Arguments.new(
-	#    '-b' => [ false, "some text" ]
-	# )
-	#
-	def initialize(fmt)
-		self.fmt = fmt
-		# I think reduce is a better name for this method, but it doesn't exist
-		# before 1.8.7, so use the stupid inject instead.
-		self.longest = fmt.keys.inject(0) { |max, str|
-			max = ((max > str.length) ? max : str.length)
-		}
-	end
+        args.each_with_index do |arg, idx|
+          if skip_next
+            skip_next = false
+            next
+          end
 
-	#
-	# Takes a string and converts it into an array of arguments.
-	#
-	def self.from_s(str)
-		Shellwords.shellwords(str)
-	end
+          if arg.length > 1 && arg[0] == '-' && arg[1] != '-'
+            arg.split('').each do |flag|
+              fmt.each_pair do |fmtspec, val|
+                next if fmtspec != "-#{flag}"
 
-	#
-	# Parses the supplied arguments into a set of options.
-	#
-	def parse(args, &block)
-		skip_next = false
+                param = nil
 
-		args.each_with_index { |arg, idx|
-			if (skip_next == true)
-				skip_next = false
-				next
-			end
+                if val[0]
+                  param = args[idx + 1]
+                  skip_next = true
+                end
 
-			if (arg.match(/^-/))
-				cfs = arg[0..2]
+                yield fmtspec, idx, param
+              end
+            end
+          else
+            yield nil, idx, arg
+          end
+        end
+      end
 
-				fmt.each_pair { |fmtspec, val|
-					next if (fmtspec != cfs)
+      #
+      # Returns usage information for this parsing context.
+      #
+      def usage
+        txt = ["\nOPTIONS:\n"]
 
-					param = nil
+        fmt.sort.each do |entry|
+          fmtspec, val = entry
+          opt = val[0] ? " <opt>  " : "        "
+          txt << "    #{fmtspec.ljust(longest.length)}#{opt}#{val[1]}"
+        end
 
-					if (val[0])
-						param = args[idx+1]
-						skip_next = true
-					end
+        txt << ""
+        txt.join("\n")
+      end
 
-					yield fmtspec, idx, param
-				}
-			else
-				yield nil, idx, arg
-			end
-		}
-	end
+      def include?(search)
+        fmt.include?(search)
+      end
 
-	#
-	# Returns usage information for this parsing context.
-	#
-	def usage
-		txt = "\nOPTIONS:\n\n"
+      def arg_required?(opt)
+        fmt[opt][0] if fmt[opt]
+      end
 
-		fmt.sort.each { |entry|
-			fmtspec, val = entry
-
-			txt << "    #{fmtspec.ljust(longest)}" + ((val[0] == true) ? " <opt>  " : "        ")
-			txt << val[1] + "\n"
-		}
-
-		txt << "\n"
-
-		return txt
-	end
-	def include?(search)
-		return fmt.include?(search)
-	end
-
-	def arg_required?(opt)
-		fmt[opt][0] if fmt[opt]
-	end
-
-	attr_accessor :fmt     # :nodoc:
-	attr_accessor :longest # :nodoc:
-
-end
-
-end
+      attr_accessor :fmt     # :nodoc:
+      attr_accessor :longest # :nodoc:
+    end
+  end
 end

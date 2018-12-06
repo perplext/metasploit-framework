@@ -40,6 +40,7 @@ hplip
 informix
 install
 irc
+karaf
 kernoops
 libuuid
 list
@@ -63,6 +64,7 @@ nuucp
 nxpgsql
 operator
 oracle
+pi
 popr
 postgres
 postmaster
@@ -107,3 +109,4 @@ www-data
 xpdb
 xpopr
 zabbix
+vagrant

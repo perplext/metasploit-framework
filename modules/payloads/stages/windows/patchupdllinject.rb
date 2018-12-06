@@ -1,15 +1,8 @@
 ##
-# $Id$
+# This module requires Metasploit: https://metasploit.com/download
+# Current source: https://github.com/rapid7/metasploit-framework
 ##
 
-##
-# This file is part of the Metasploit Framework and may be subject to
-# redistribution and commercial restrictions. Please see the Metasploit
-# web site for more information on licensing and terms of use.
-#   http://metasploit.com/
-##
-
-require 'msf/core'
 require 'msf/core/payload/windows/dllinject'
 
 ###
@@ -17,9 +10,8 @@ require 'msf/core/payload/windows/dllinject'
 # Injects an arbitrary DLL in the exploited process.
 #
 ###
-module Metasploit3
+module MetasploitModule
 
-	# $Revision$
-	include Msf::Payload::Windows::DllInject
+  include Msf::Payload::Windows::DllInject
 
 end

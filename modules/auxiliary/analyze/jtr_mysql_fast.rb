@@ -1,160 +1,100 @@
 ##
-# $Id$
+# This module requires Metasploit: https://metasploit.com/download
+# Current source: https://github.com/rapid7/metasploit-framework
 ##
 
-##
-# This file is part of the Metasploit Framework and may be subject to
-# redistribution and commercial restrictions. Please see the Metasploit
-# web site for more information on licensing and terms of use.
-#   http://metasploit.com/
-#
-##
+require 'msf/core/auxiliary/jtr'
 
+class MetasploitModule < Msf::Auxiliary
+  include Msf::Auxiliary::JohnTheRipper
 
-require 'msf/core'
+  def initialize
+    super(
+      'Name'          => 'John the Ripper MySQL Password Cracker (Fast Mode)',
+      'Description'   => %Q{
+          This module uses John the Ripper to identify weak passwords that have been
+        acquired from the mysql_hashdump module. Passwords that have been successfully
+        cracked are then saved as proper credentials
+      },
+      'Author'         =>
+        [
+          'theLightCosine',
+          'hdm'
+        ] ,
+      'License'        => MSF_LICENSE  # JtR itself is GPLv2, but this wrapper is MSF (BSD)
+    )
+  end
 
-class Metasploit3 < Msf::Auxiliary
+  def run
+    cracker = new_john_cracker
 
-	include Msf::Auxiliary::JohnTheRipper
+    # generate our wordlist and close the file handle
+    wordlist = wordlist_file
+    unless wordlist
+      print_error('This module cannot run without a database connected. Use db_connect to connect to a database.')
+      return
+    end
 
-	def initialize
-		super(
-			'Name'          => 'John the Ripper MySQL Password Cracker (Fast Mode)',
-			'Version'       => '$Revision$',
-			'Description'   => %Q{
-					This module uses John the Ripper to identify weak passwords that have been
-				acquired from the mysql_hashdump module. Passwords that have been successfully
-				cracked are then saved as proper credentials
-			},
-			'Author'         =>
-				[
-					'TheLightCosine <thelightcosine[at]gmail.com>',
-					'hdm'
-				] ,
-			'License'        => MSF_LICENSE  # JtR itself is GPLv2, but this wrapper is MSF (BSD)
-		)
-	end
+    wordlist.close
+    print_status "Wordlist file written out to #{wordlist.path}"
+    cracker.wordlist = wordlist.path
+    cracker.hash_path = hash_file
 
-	def run
-		wordlist = Rex::Quickfile.new("jtrtmp")
+    ['mysql','mysql-sha1'].each do |format|
+      cracker_instance = cracker.dup
+      cracker_instance.format = format
+      print_status "Cracking #{format} hashes in normal wordlist mode..."
+      # Turn on KoreLogic rules if the user asked for it
+      if datastore['KoreLogic']
+        cracker_instance.rules = 'KoreLogicRules'
+        print_status "Applying KoreLogic ruleset..."
+      end
+      cracker_instance.crack do |line|
+        print_status line.chomp
+      end
 
-		wordlist.write( build_seed().flatten.uniq.join("\n") + "\n" )
-		wordlist.close
+      print_status "Cracking #{format} hashes in single mode..."
+      cracker_instance.rules = 'single'
+      cracker_instance.crack do |line|
+        print_status line.chomp
+      end
 
-		hashlist = Rex::Quickfile.new("jtrtmp")
+      print_status "Cracking #{format} hashes in incremental mode (Digits)..."
+      cracker_instance.incremental = 'Digits'
+      cracker_instance.crack do |line|
+        print_status line.chomp
+      end
 
-		myloots = myworkspace.loots.where('ltype=?', 'mysql.hashes')
-		unless myloots.nil? or myloots.empty?
-			myloots.each do |myloot|
-				begin
-					mssql_array = CSV.read(myloot.path).drop(1)
-				rescue Exception => e
-					print_error("Unable to read #{myloot.path} \n #{e}")
-				end
-				mssql_array.each do |row|
-					hashlist.write("#{row[0]}:#{row[1]}:#{myloot.host.address}:#{myloot.service.port}\n")
-				end
-			end
-			hashlist.close
+      print_status "Cracked Passwords this run:"
+      cracker_instance.each_cracked_password do |password_line|
+        password_line.chomp!
+        next if password_line.blank?
+        fields = password_line.split(":")
+        # If we don't have an expected minimum number of fields, this is probably not a hash line
+        next unless fields.count >=3
+        username = fields.shift
+        core_id  = fields.pop
+        password = fields.join(':') # Anything left must be the password. This accounts for passwords with : in them
+        print_good password_line
+        create_cracked_credential( username: username, password: password, core_id: core_id)
+      end
+    end
+  end
 
-			print_status("HashList: #{hashlist.path}")
-			print_status("Trying 'mysql-fast' Wordlist: #{wordlist.path}")
-			john_crack(hashlist.path, :wordlist => wordlist.path, :rules => 'single', :format => 'mysql-fast')
+  def hash_file
+    hashlist = Rex::Quickfile.new("hashes_tmp")
+    framework.db.creds(workspace: myworkspace, type: 'Metasploit::Credential::NonreplayableHash').each do |core|
+      if core.private.jtr_format =~ /mysql|mysql-sha1/
+        user = core.public.username
+        hash_string = core.private.data
+        id = core.id
+        hashlist.puts "#{user}:#{hash_string}:#{id}:"
+      end
+    end
+    hashlist.close
+    print_status "Hashes Written out to #{hashlist.path}"
+    hashlist.path
+  end
 
-			print_status("Trying 'mysql-fast' Rule: All4...")
-			john_crack(hashlist.path, :incremental => "All4", :format => 'mysql-fast')
-
-			print_status("Trying mysql-fast Rule: Digits5...")
-			john_crack(hashlist.path, :incremental => "Digits5", :format => 'mysql-fast')
-
-			cracked = john_show_passwords(hashlist.path, 'mysql-fast')
-
-			print_status("#{cracked[:cracked]} hashes were cracked!")
-
-			#Save cracked creds and add the passwords back to the wordlist for the next round
-			tfd = ::File.open(wordlist.path, "ab")
-			cracked[:users].each_pair do |k,v|
-				print_good("Host: #{v[1]} Port: #{v[2]} User: #{k} Pass: #{v[0]}")
-				tfd.write( v[0] + "\n" )
-				report_auth_info(
-					:host  => v[1],
-					:port => v[2],
-					:sname => 'mssql',
-					:user => k,
-					:pass => v[0]
-				)
-			end
-
-			print_status("Trying 'mysql-sha1' Wordlist: #{wordlist.path}")
-			john_crack(hashlist.path, :wordlist => wordlist.path, :rules => 'single', :format => 'mysql-sha1')
-
-			print_status("Trying 'mysql-sha1' Rule: All4...")
-			john_crack(hashlist.path, :incremental => "All4", :format => 'mysql-sha1')
-
-			print_status("Trying 'mysql-sha1' Rule: Digits5...")
-			john_crack(hashlist.path, :incremental => "Digits5", :format => 'mysql-sha1')
-
-			cracked = john_show_passwords(hashlist.path, 'mysql-sha1')
-
-			print_status("#{cracked[:cracked]} hashes were cracked!")
-
-			cracked[:users].each_pair do |k,v|
-				print_good("Host: #{v[1]} Port: #{v[2]} User: #{k} Pass: #{v[0]}")
-				report_auth_info(
-					:host  => v[1],
-					:port => v[2],
-					:sname => 'mssql',
-					:user => k,
-					:pass => v[0]
-				)
-			end
-
-		end
-
-	end
-
-	def build_seed
-
-		seed = []
-		#Seed the wordlist with Database , Table, and Instance Names
-		schemas = myworkspace.notes.where('ntype like ?', '%.schema%')
-		unless schemas.nil? or schemas.empty?
-			schemas.each do |anote|
-				anote.data.each do |key,value|
-					seed << key
-					value.each{|a| seed << a}
-				end
-			end
-		end
-
-		instances = myworkspace.notes.where('ntype=?', 'mssql.instancename')
-		unless instances.nil? or instances.empty?
-			instances.each do |anote|
-				seed << anote.data['InstanceName']
-			end
-		end
-
-		# Seed the wordlist with usernames, passwords, and hostnames
-
-		myworkspace.hosts.find(:all).each {|o| seed << john_expand_word( o.name ) if o.name }
-		myworkspace.creds.each do |o|
-			seed << john_expand_word( o.user ) if o.user
-			seed << john_expand_word( o.pass ) if (o.pass and o.ptype !~ /hash/)
-		end
-
-		# Grab any known passwords out of the john.pot file
-		john_cracked_passwords.values {|v| seed << v }
-
-		#Grab the default John Wordlist
-		john = File.open(john_wordlist_path, "rb")
-		john.each_line{|line| seed << line.chomp}
-
-		return seed
-
-	end
-
-	# huh?
-	def crack(format)
-	end
 
 end

@@ -1,249 +1,236 @@
 ##
-# $Id$
+# This module requires Metasploit: https://metasploit.com/download
+# Current source: https://github.com/rapid7/metasploit-framework
 ##
 
-##
-# This file is part of the Metasploit Framework and may be subject to
-# redistribution and commercial restrictions. Please see the Metasploit
-# web site for more information on licensing and terms of use.
-#   http://metasploit.com/
-##
+class MetasploitModule < Msf::Auxiliary
+  include Msf::Exploit::Remote::Tcp
+
+  # Scanner mixin should be near last
+  include Msf::Auxiliary::Scanner
+  include Msf::Auxiliary::Report
 
+  def initialize
+    super(
+      'Name'		=> 'Borland InterBase Services Manager Information',
+      'Description'	=> %q{
+        This module retrieves version of the services manager, version
+        and implementation of the InterBase server from InterBase
+        Services Manager.
+      },
+      'Author'	=>
+        [
+          'Ramon de C Valle',
+          'Adriano Lima <adriano[at]risesecurity.org>',
+        ],
+      'License'	=> MSF_LICENSE
+    )
 
-require 'msf/core'
+    register_options(
+      [
+        Opt::RPORT(3050)
+      ],
+      self.class
+    )
 
+  end
 
-class Metasploit3 < Msf::Auxiliary
+  # Create service parameter block
+  def spb_create
+    isc_dpb_user_name = 28
+    isc_dpb_password = 29
 
-	include Msf::Exploit::Remote::Tcp
+    isc_spb_user_name = isc_dpb_user_name
+    isc_spb_password = isc_dpb_password
 
-	# Scanner mixin should be near last
-	include Msf::Auxiliary::Scanner
-	include Msf::Auxiliary::Report
+    isc_spb_current_version = 2
+    isc_spb_version = isc_spb_current_version
 
-	def initialize
-		super(
-			'Name'		=> 'Borland InterBase Services Manager Information',
-			'Description'	=> %q{
-				This module retrieves version of the services manager, version
-				and implementation of the InterBase server from InterBase
-				Services Manager.
-			},
-			'Version'	=> '$Revision$',
-			'Author'	=>
-				[
-					'ramon',
-					'Adriano Lima <adriano[at]risesecurity.org>',
-				],
-			'License'	=> MSF_LICENSE
-		)
+    user = 'SYSDBA'
+    pass = 'masterkey'
 
-		register_options(
-			[
-				Opt::RPORT(3050)
-			],
-			self.class
-		)
+    spb = ''
 
-	end
+    spb << [isc_spb_version].pack('c')
+    spb << [isc_spb_current_version].pack('c')
 
-	# Create service parameter block
-	def spb_create
-		isc_dpb_user_name = 28
-		isc_dpb_password = 29
+    spb << [isc_spb_user_name].pack('c')
+    spb << [user.length].pack('c')
+    spb << user
 
-		isc_spb_user_name = isc_dpb_user_name
-		isc_spb_password = isc_dpb_password
+    spb << [isc_spb_password].pack('c')
+    spb << [pass.length].pack('c')
+    spb << pass
 
-		isc_spb_current_version = 2
-		isc_spb_version = isc_spb_current_version
+    spb
+  end
 
-		user = 'SYSDBA'
-		pass = 'masterkey'
+  # Create receive buffer
+  def recv_spb_create
+    # Retrieves the version of the services manager
+    isc_info_svc_version = 54
 
-		spb = ''
+    # Retrieves the version of the InterBase server
+    isc_info_svc_server_version = 55
 
-		spb << [isc_spb_version].pack('c')
-		spb << [isc_spb_current_version].pack('c')
+    # Retrieves the implementation of the InterBase server
+    isc_info_svc_implementation = 56
 
-		spb << [isc_spb_user_name].pack('c')
-		spb << [user.length].pack('c')
-		spb << user
+    recv_spb = ''
 
-		spb << [isc_spb_password].pack('c')
-		spb << [pass.length].pack('c')
-		spb << pass
+    recv_spb << [isc_info_svc_version].pack('c')
+    recv_spb << [isc_info_svc_server_version].pack('c')
+    recv_spb << [isc_info_svc_implementation].pack('c')
 
-		spb
-	end
+    recv_spb
+  end
 
-	# Create receive buffer
-	def recv_spb_create
-		# Retrieves the version of the services manager
-		isc_info_svc_version = 54
+  # Calculate buffer padding
+  def buf_padding(length = '')
+    remainder = length.remainder(4)
+    padding = 0
 
-		# Retrieves the version of the InterBase server
-		isc_info_svc_server_version = 55
+    if remainder > 0
+      padding = (4 - remainder)
+    end
 
-		# Retrieves the implementation of the InterBase server
-		isc_info_svc_implementation = 56
+    padding
+  end
 
-		recv_spb = ''
+  def run_host(ip)
 
-		recv_spb << [isc_info_svc_version].pack('c')
-		recv_spb << [isc_info_svc_server_version].pack('c')
-		recv_spb << [isc_info_svc_implementation].pack('c')
+    #
+    # Using the InterBase Services Manager
+    # http://dn.codegear.com/article/27002
+    #
 
-		recv_spb
-	end
+    begin
 
-	# Calculate buffer padding
-	def buf_padding(length = '')
-		remainder = length.remainder(4)
-		padding = 0
+      print_status("Trying #{ip}")
 
-		if remainder > 0
-			padding = (4 - remainder)
-		end
+      connect
 
-		padding
-	end
+      # isc_service_attach
 
-	def run_host(ip)
+      # Service name
+      svc_name = 'service_mgr'
 
-		#
-		# Using the InterBase Services Manager
-		# http://dn.codegear.com/article/27002
-		#
+      # Service attach
+      op_service_attach = 82
 
-		begin
+      buf = ''
 
-			print_status("Trying #{ip}")
+      # Operation/packet type
+      buf << [op_service_attach].pack('N')
 
-			connect
+      # Id
+      buf << [0].pack('N')
 
-			# isc_service_attach
+      # Length
+      buf << [svc_name.length].pack('N')
 
-			# Service name
-			svc_name = 'service_mgr'
+      # Service name
+      buf << svc_name
 
-			# Service attach
-			op_service_attach = 82
+      # Padding
+      buf << "\x00" * buf_padding(svc_name.length)
 
-			buf = ''
+      # Create service parameter block
+      spb = spb_create
 
-			# Operation/packet type
-			buf << [op_service_attach].pack('N')
+      # Service parameter block length
+      buf << [spb.length].pack('N')
 
-			# Id
-			buf << [0].pack('N')
+      # Service parameter block
+      buf << spb
 
-			# Length
-			buf << [svc_name.length].pack('N')
+      # Padding
+      buf << "\x00" * buf_padding(spb.length)
 
-			# Service name
-			buf << svc_name
+      sock.put(buf)
 
-			# Padding
-			buf << "\x00" * buf_padding(svc_name.length)
+      response = sock.get_once || ''
 
-			# Create service parameter block
-			spb = spb_create
+      # print(Rex::Text.to_hex_dump(response))
 
-			# Service parameter block length
-			buf << [spb.length].pack('N')
 
-			# Service parameter block
-			buf << spb
+      # isc_service_query
 
-			# Padding
-			buf << "\x00" * buf_padding(spb.length)
+      # Response buffer length
+      response_buffer_length = 64
 
-			sock.put(buf)
+      # Service info
+      op_service_info = 84
 
-			response = sock.get_once
+      buf = ''
 
-			# print(Rex::Text.to_hex_dump(response))
+      # Operation/packet type
+      buf << [op_service_info].pack('N')
 
+      # Id
+      buf << [0].pack('N')
 
-			# isc_service_query
+      # ?
+      buf << [0].pack('N')
 
-			# Response buffer length
-			response_buffer_length = 64
+      # ?
+      buf << [0].pack('N')
 
-			# Service info
-			op_service_info = 84
+      # Create receive buffer
+      recv_spb = recv_spb_create
 
-			buf = ''
+      # Receive buffer length
+      buf << [recv_spb.length].pack('N')
 
-			# Operation/packet type
-			buf << [op_service_info].pack('N')
+      # Receive buffer
+      buf << recv_spb
 
-			# Id
-			buf << [0].pack('N')
+      # Padding
+      buf << "\x00" * buf_padding(recv_spb.length)
 
-			# ?
-			buf << [0].pack('N')
+      # Response buffer length
+      buf << [response_buffer_length].pack('N')
 
-			# ?
-			buf << [0].pack('N')
+      sock.put(buf)
 
-			# Create receive buffer
-			recv_spb = recv_spb_create
+      response = sock.get_once || ''
 
-			# Receive buffer length
-			buf << [recv_spb.length].pack('N')
+      res = response.unpack('x28Z*Z*')
 
-			# Receive buffer
-			buf << recv_spb
+      info_svc_server_version = res[0].chop.chop
+      info_svc_implementation = res[1].chop
 
-			# Padding
-			buf << "\x00" * buf_padding(recv_spb.length)
+      print("IP Address: #{ip}\n")
+      # print("Version of the services manager: #{info_svc_version}\n")
+      print("Version of the InterBase server: #{info_svc_server_version}\n")
+      print("Implementation of the InterBase server: #{info_svc_implementation}\n\n")
 
-			# Response buffer length
-			buf << [response_buffer_length].pack('N')
+      #print(Rex::Text.to_hex_dump(response))
 
-			sock.put(buf)
+      # Add Report
+      report_note(
+        :host	=> ip,
+        :sname	=> 'ib',
+        :proto	=> 'tcp',
+        :port	=> rport,
+        :type	=> 'Version of the InterBase server',
+        :data	=> "Version of the InterBase server: #{info_svc_server_version}"
+      )
 
-			response = sock.get_once
+      # Add Report
+      report_note(
+        :host	=> ip,
+        :sname	=> 'ib',
+        :proto	=> 'tcp',
+        :port	=> rport,
+        :type	=> 'Implementation of the InterBase server',
+        :data	=> "Implementation of the InterBase server: #{info_svc_implementation}"
+      )
 
-			res = response.unpack('x28Z*Z*')
+    rescue ::Rex::ConnectionError
+    rescue ::Errno::EPIPE
 
-			info_svc_server_version = res[0].chop.chop
-			info_svc_implementation = res[1].chop
+    end
 
-			print("IP Address: #{ip}\n")
-			# print("Version of the services manager: #{info_svc_version}\n")
-			print("Version of the InterBase server: #{info_svc_server_version}\n")
-			print("Implementation of the InterBase server: #{info_svc_implementation}\n\n")
-
-			# print(Rex::Text.to_hex_dump(response))
-
-			#Add Report
-			report_note(
-				:host	=> ip,
-				:sname	=> 'ib',
-				:proto	=> 'tcp',
-				:port	=> rport,
-				:type	=> 'Version of the InterBase server',
-				:data	=> "Version of the InterBase server: #{info_svc_server_version}"
-			)
-
-			#Add Report
-			report_note(
-				:host	=> ip,
-				:sname	=> 'ib',
-				:proto	=> 'tcp',
-				:port	=> rport,
-				:type	=> 'Implementation of the InterBase server',
-				:data	=> "Implementation of the InterBase server: #{info_svc_implementation}"
-			)
-
-		rescue ::Rex::ConnectionError
-		rescue ::Errno::EPIPE
-
-		end
-
-	end
-
+  end
 end

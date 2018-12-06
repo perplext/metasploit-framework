@@ -1,76 +1,76 @@
 ##
-# $Id$
+# This module requires Metasploit: https://metasploit.com/download
+# Current source: https://github.com/rapid7/metasploit-framework
 ##
 
-##
-# This file is part of the Metasploit Framework and may be subject to
-# redistribution and commercial restrictions. Please see the Metasploit
-# web site for more information on licensing and terms of use.
-#   http://metasploit.com/
-##
+class MetasploitModule < Msf::Auxiliary
 
+  # Exploit mixins should be called first
+  include Msf::Exploit::Remote::SMB::Client
+  include Msf::Exploit::Remote::SMB::Client::Authenticated
+  include Msf::Exploit::Remote::SMB::Client::LocalPaths
+  include Msf::Exploit::Remote::SMB::Client::RemotePaths
+  include Msf::Auxiliary::Report
+  include Msf::Auxiliary::Scanner
 
-require 'msf/core'
+  def initialize
+    super(
+      'Name'        => 'SMB File Upload Utility',
+      'Description' => %Q{
+        This module uploads a file to a target share and path. The only reason
+      to use this module is if your existing SMB client is not able to support the features
+      of the Metasploit Framework that you need, like pass-the-hash authentication.
+      },
+      'Author'      =>
+        [
+          'hdm'    # metasploit module
+        ],
+      'References'  =>
+        [
+        ],
+      'License'     => MSF_LICENSE
+    )
 
+    register_options([
+      OptString.new('SMBSHARE', [true, 'The name of a writeable share on the server', 'C$'])
+    ])
 
-class Metasploit3 < Msf::Auxiliary
+  end
 
-	# Exploit mixins should be called first
-	include Msf::Exploit::Remote::SMB
-	include Msf::Auxiliary::Report
+  def run_host(_ip)
+    begin
+      vprint_status("Connecting to the server...")
+      connect(versions: [1, 2])
+      smb_login()
 
-	# Aliases for common classes
-	SIMPLE = Rex::Proto::SMB::SimpleClient
-	XCEPT  = Rex::Proto::SMB::Exceptions
-	CONST  = Rex::Proto::SMB::Constants
+      vprint_status("Mounting the remote share \\\\#{datastore['RHOST']}\\#{datastore['SMBSHARE']}'...")
+      self.simple.connect("\\\\#{rhost}\\#{datastore['SMBSHARE']}")
 
+      remote_path = remote_paths.first
 
-	def initialize
-		super(
-			'Name'        => 'SMB File Upload Utility',
-			'Version'     => '$Revision$',
-			'Description' => %Q{
-				This module uploads a file to a target share and path. The only reason
-			to use this module is if your existing SMB client is not able to support the features
-			of the Metasploit Framework that you need, like pass-the-hash authentication.
-			},
-			'Author'      =>
-				[
-					'hdm'    # metasploit module
-				],
-			'References'  =>
-				[
-				],
-			'License'     => MSF_LICENSE
-		)
+      if local_paths.nil?
+        print_error("Local paths not specified")
+        return
+      end
 
-		register_options([
-			OptString.new('SMBSHARE', [true, 'The name of a writeable share on the server', 'C$']),
-			OptString.new('RPATH', [true, 'The name of the remote file relative to the share']),
-			OptString.new('LPATH', [true, 'The path of the local file to upload'])
-		], self.class)
+      local_paths.each do |local_path|
+        begin
+          vprint_status("Trying to upload #{local_path} to #{remote_path}...")
 
-	end
+          fd = simple.open("#{remote_path}", 's', write: true)
+          data = ::File.read(datastore['LPATH'], ::File.size(datastore['LPATH']))
+          fd.write(data)
+          fd.close
 
-	def run
-
-		data = ::File.read(datastore['LPATH'], ::File.size(datastore['LPATH']))
-		print_status("Read #{data.length} bytes from #{datastore['LPATH']}...")
-
-		print_status("Connecting to the server...")
-		connect()
-		smb_login()
-
-		print_status("Mounting the remote share \\\\#{datastore['RHOST']}\\#{datastore['SMBSHARE']}'...")
-		self.simple.connect("\\\\#{rhost}\\#{datastore['SMBSHARE']}")
-
-		print_status("Trying to upload #{datastore['RPATH']}...")
-
-		fd = simple.open("\\#{datastore['RPATH']}", 'rwct')
-		fd.write(data)
-		fd.close
-
-		print_status("The file has been uploaded to #{datastore['RPATH']}...")
-	end
-
+          print_good("#{local_path} uploaded to #{remote_path}")
+        rescue Rex::Proto::SMB::Exceptions::ErrorCode => e
+          elog("#{e.class} #{e.message}\n#{e.backtrace * "\n"}")
+          print_error("Unable to upload #{local_path} to #{remote_path} : #{e.message}")
+        end
+      end
+    rescue Rex::Proto::SMB::Exceptions::LoginError => e
+      elog("#{e.class} #{e.message}\n#{e.backtrace * "\n"}")
+      print_error("Unable to login: #{e.message}")
+    end
+  end
 end
